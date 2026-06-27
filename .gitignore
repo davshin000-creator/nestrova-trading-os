@@ -1,0 +1,13 @@
+.env
+state.json
+trade_log.csv
+filter_log.csv
+ai_decision_log.csv
+rank_history.csv
+candidate_memory.json
+entry_quality.csv
+external_news.csv
+__pycache__/
+*.pyc
+.venv/
+venv/
