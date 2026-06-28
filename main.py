@@ -113,6 +113,9 @@ CANDIDATE_MEMORY_FILE = "candidate_memory.json"
 EXTERNAL_NEWS_FILE = "external_news.csv"  # optional: time,ticker,sentiment,impact
 TOURNAMENT_LOG_FILE = "tournament_log.csv"
 EXPERIENCE_MEMORY_FILE = "experience_memory.json"
+EXPERIENCE_CANDIDATES_FILE = "experience_candidates.csv"
+MISSED_OPPORTUNITY_FILE = "missed_opportunities.csv"
+DAILY_REPORT_FILE = "daily_ai_report.txt"
 
 # AI Decision Engine
 AI_CONFIDENCE_BUY_THRESHOLD = 86
@@ -138,6 +141,14 @@ TOURNAMENT_WATCH_THRESHOLD = 68
 TOURNAMENT_RISK_BLOCK = 88
 TOURNAMENT_MEMORY_LOOKBACK = 120
 TOURNAMENT_STRATEGY_BONUS_MAX = 18
+
+# Experience Memory / Missed Opportunity Engine v4.5
+EXPERIENCE_CANDIDATE_TOP_N = 20
+EXPERIENCE_EVAL_HOURS = 3
+MISSED_OPPORTUNITY_GAIN = 0.05
+MISSED_OPPORTUNITY_DROP = -0.03
+EXPERIENCE_SCORE_BONUS_MAX = 18
+DAILY_REPORT_HOUR = 0
 
 # Market mode
 TREND_DAY_MIN_BTC_4H = 0.003
@@ -2657,6 +2668,267 @@ def apply_tournament_engine(results):
     return upgraded
 
 
+
+def init_experience_candidates_log():
+    if not os.path.exists(EXPERIENCE_CANDIDATES_FILE):
+        with open(EXPERIENCE_CANDIDATES_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "eval_time", "evaluated", "bought",
+                "ticker", "rank_position", "price", "market_regime", "market_mode",
+                "strategy", "ai_confidence", "ai_risk", "expected_profit",
+                "tournament_winner", "tournament_score", "rank_score",
+                "relative_strength", "change_15m", "change_1h",
+                "volume_accel", "rsi", "daily_change"
+            ])
+
+
+def log_experience_candidates(results, bought_ticker=""):
+    init_experience_candidates_log()
+    now_ts = time.time()
+    eval_ts = now_ts + EXPERIENCE_EVAL_HOURS * 3600
+
+    with open(EXPERIENCE_CANDIDATES_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        for i, r in enumerate(results[:EXPERIENCE_CANDIDATE_TOP_N], start=1):
+            writer.writerow([
+                now_text(),
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(eval_ts)),
+                "0",
+                "1" if r.get("ticker") == bought_ticker else "0",
+                r.get("ticker", ""),
+                i,
+                r.get("price", ""),
+                r.get("market_regime", ""),
+                r.get("market_mode", ""),
+                r.get("strategy", ""),
+                round(r.get("ai_confidence", 0), 2),
+                round(r.get("ai_risk", 0), 2),
+                round(r.get("expected_profit", 0), 5),
+                r.get("tournament_winner", ""),
+                round(r.get("tournament_score", 0), 2),
+                round(r.get("rank_score", 0), 2),
+                round(r.get("relative_strength", 0), 5),
+                round(r.get("change_15m", 0), 5),
+                round(r.get("change_1h", 0), 5),
+                round(r.get("volume_accel", 0), 3),
+                round(r.get("rsi", 0), 2),
+                round(r.get("daily_change", 0), 5),
+            ])
+
+
+def init_missed_opportunity_log():
+    if not os.path.exists(MISSED_OPPORTUNITY_FILE):
+        with open(MISSED_OPPORTUNITY_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "original_time", "ticker", "bought",
+                "entry_price", "eval_price", "future_return",
+                "label", "rank_position", "ai_confidence",
+                "ai_risk", "strategy", "tournament_winner"
+            ])
+
+
+def write_missed_opportunity(row, eval_price, future_return, label):
+    init_missed_opportunity_log()
+    with open(MISSED_OPPORTUNITY_FILE, "a", newline="") as f:
+        csv.writer(f).writerow([
+            now_text(),
+            row.get("time", ""),
+            row.get("ticker", ""),
+            row.get("bought", ""),
+            row.get("price", ""),
+            eval_price,
+            round(future_return, 5),
+            label,
+            row.get("rank_position", ""),
+            row.get("ai_confidence", ""),
+            row.get("ai_risk", ""),
+            row.get("strategy", ""),
+            row.get("tournament_winner", "")
+        ])
+
+
+def evaluate_pending_experience_candidates():
+    if not os.path.exists(EXPERIENCE_CANDIDATES_FILE):
+        return
+
+    try:
+        with open(EXPERIENCE_CANDIDATES_FILE, "r") as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:
+        print("Experience 후보 읽기 오류:", e)
+        return
+
+    changed = False
+    now_dt = datetime.now()
+    updated_rows = []
+
+    for row in rows:
+        if row.get("evaluated") == "1":
+            updated_rows.append(row)
+            continue
+
+        try:
+            eval_time = datetime.strptime(row.get("eval_time", ""), "%Y-%m-%d %H:%M:%S")
+            if now_dt < eval_time:
+                updated_rows.append(row)
+                continue
+
+            ticker = row.get("ticker", "")
+            entry_price = float(row.get("price", 0))
+            if not ticker or entry_price <= 0:
+                row["evaluated"] = "1"
+                updated_rows.append(row)
+                changed = True
+                continue
+
+            eval_price = pyupbit.get_current_price(ticker)
+            if not eval_price:
+                updated_rows.append(row)
+                continue
+
+            future_return = (eval_price - entry_price) / entry_price
+
+            if future_return >= MISSED_OPPORTUNITY_GAIN and row.get("bought") != "1":
+                label = "MISSED_BIG_GAIN"
+            elif future_return <= MISSED_OPPORTUNITY_DROP and row.get("bought") != "1":
+                label = "GOOD_SKIP"
+            elif future_return >= 0.02 and row.get("bought") == "1":
+                label = "BOUGHT_GOOD"
+            elif future_return <= -0.02 and row.get("bought") == "1":
+                label = "BOUGHT_BAD"
+            else:
+                label = "NEUTRAL"
+
+            write_missed_opportunity(row, eval_price, future_return, label)
+            row["evaluated"] = "1"
+            changed = True
+            updated_rows.append(row)
+
+        except Exception as e:
+            print("후보 경험 평가 오류:", e)
+            updated_rows.append(row)
+
+    if changed:
+        with open(EXPERIENCE_CANDIDATES_FILE, "w", newline="") as f:
+            if updated_rows:
+                writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
+                writer.writeheader()
+                writer.writerows(updated_rows)
+
+
+def get_experience_score_bonus(result):
+    if not os.path.exists(MISSED_OPPORTUNITY_FILE):
+        return 0, []
+
+    try:
+        with open(MISSED_OPPORTUNITY_FILE, "r") as f:
+            rows = list(csv.DictReader(f))[-500:]
+    except Exception as e:
+        print("Experience score 읽기 오류:", e)
+        return 0, []
+
+    ticker = result.get("ticker", "")
+    strategy_base = result.get("strategy", "").split(" + ")[0]
+    tournament = result.get("tournament_winner", "")
+
+    bonus = 0
+    reasons = []
+
+    similar = []
+    for row in rows:
+        score = 0
+
+        if row.get("ticker") == ticker:
+            score += 2
+        if strategy_base and strategy_base in row.get("strategy", ""):
+            score += 2
+        if tournament and row.get("tournament_winner") == tournament:
+            score += 2
+
+        try:
+            old_conf = float(row.get("ai_confidence", 0))
+            new_conf = float(result.get("ai_confidence", 0))
+            if abs(old_conf - new_conf) <= 10:
+                score += 1
+        except Exception:
+            pass
+
+        if score >= 3:
+            similar.append(row)
+
+    if len(similar) >= 3:
+        values = []
+        for row in similar:
+            try:
+                values.append(float(row.get("future_return", 0)))
+            except Exception:
+                pass
+
+        if values:
+            win_rate = len([v for v in values if v > 0]) / len(values)
+            avg = sum(values) / len(values) * 100
+            b = (win_rate - 0.5) * 25 + avg * 2
+            b = clamp(b, -EXPERIENCE_SCORE_BONUS_MAX, EXPERIENCE_SCORE_BONUS_MAX)
+            bonus += b
+            reasons.append(f"경험점수 {len(values)}건 {b:.1f}")
+
+    return bonus, reasons
+
+
+def generate_daily_ai_report():
+    today = time.strftime("%Y-%m-%d")
+
+    sells = read_recent_sells(200)
+    today_sells = [s for s in sells if s.get("time", "").startswith(today)]
+
+    total = len(today_sells)
+    wins = len([s for s in today_sells if s.get("profit_rate", 0) > 0])
+    total_profit = sum([s.get("profit_rate", 0) for s in today_sells]) * 100
+
+    missed = []
+    good_skips = []
+
+    if os.path.exists(MISSED_OPPORTUNITY_FILE):
+        try:
+            with open(MISSED_OPPORTUNITY_FILE, "r") as f:
+                rows = list(csv.DictReader(f))
+            for r in rows:
+                if r.get("time", "").startswith(today):
+                    if r.get("label") == "MISSED_BIG_GAIN":
+                        missed.append(r)
+                    elif r.get("label") == "GOOD_SKIP":
+                        good_skips.append(r)
+        except Exception:
+            pass
+
+    win_rate = (wins / total * 100) if total else 0
+
+    lines = []
+    lines.append(f"===== Daily AI Report {today} =====")
+    lines.append(f"거래 수: {total}")
+    lines.append(f"승률: {win_rate:.1f}%")
+    lines.append(f"총 수익률 합계: {total_profit:.2f}%")
+    lines.append(f"놓친 큰 기회: {len(missed)}개")
+    lines.append(f"잘 피한 후보: {len(good_skips)}개")
+
+    if missed:
+        lines.append("")
+        lines.append("상위 놓친 기회:")
+        missed_sorted = sorted(missed, key=lambda x: float(x.get("future_return", 0)), reverse=True)
+        for r in missed_sorted[:10]:
+            lines.append(
+                f"- {r.get('ticker')} | {float(r.get('future_return', 0))*100:.2f}% | "
+                f"AI {r.get('ai_confidence')} | {r.get('strategy')}"
+            )
+
+    report = "\n".join(lines)
+
+    with open(DAILY_REPORT_FILE, "w") as f:
+        f.write(report)
+
+    print(report)
+
+
 def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
     learning = get_auto_learning_adjustments()
     advanced_learning = get_advanced_learning_adjustments()
@@ -2765,6 +3037,7 @@ def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
     results = apply_tournament_engine(results)
     write_rank_history(results)
     update_candidate_memory(results)
+    log_experience_candidates(results)
 
     print(f"통과 코인 수: {len(results)}")
     print("===== AI 후보 랭킹 =====")
@@ -3352,10 +3625,12 @@ def manage_holding(ticker, state):
 # MAIN LOOP
 # =========================
 def main():
-    print("Upbit AI Tournament Engine v4.0 시작")
+    print("Upbit Experience Memory v4.5 시작")
 
     if not check_required_env_keys():
         return
+
+    evaluate_pending_experience_candidates()
 
     init_trade_log()
     analyze_trade_log()
