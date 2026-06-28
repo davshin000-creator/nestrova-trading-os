@@ -105,17 +105,14 @@ COINGECKO_SCORE_MAX = 20
 
 STATE_FILE = "state.json"
 TRADE_LOG_FILE = "trade_log.csv"
+ENTRY_ZONE_LOG_FILE = "entry_zone_log.csv"
+PREDICTION_LOG_FILE = "candidate_prediction_log.csv"
 ENTRY_QUALITY_FILE = "entry_quality.csv"
 FILTER_LOG_FILE = "filter_log.csv"
 AI_DECISION_LOG_FILE = "ai_decision_log.csv"
 RANK_HISTORY_FILE = "rank_history.csv"
 CANDIDATE_MEMORY_FILE = "candidate_memory.json"
 EXTERNAL_NEWS_FILE = "external_news.csv"  # optional: time,ticker,sentiment,impact
-TOURNAMENT_LOG_FILE = "tournament_log.csv"
-EXPERIENCE_MEMORY_FILE = "experience_memory.json"
-EXPERIENCE_CANDIDATES_FILE = "experience_candidates.csv"
-MISSED_OPPORTUNITY_FILE = "missed_opportunities.csv"
-DAILY_REPORT_FILE = "daily_ai_report.txt"
 
 # AI Decision Engine
 AI_CONFIDENCE_BUY_THRESHOLD = 86
@@ -123,6 +120,19 @@ AI_CONFIDENCE_WATCH_THRESHOLD = 72
 AI_RISK_BLOCK_THRESHOLD = 78
 AI_MIN_EXPECTED_PROFIT = 0.004
 AI_TOP_N = 20
+
+# v5.0 Dynamic Entry Zone / Candidate Prediction
+DYNAMIC_ENTRY_ENABLED = True
+ENTRY_ZONE_LOOKBACK = 48
+ENTRY_ZONE_ATR_MULTIPLIER = 0.35
+ENTRY_ZONE_MIN_DISCOUNT = 0.0015
+ENTRY_ZONE_MAX_DISCOUNT = 0.012
+ENTRY_ZONE_BREAKOUT_ALLOW_CONFIDENCE = 92
+ENTRY_ZONE_BREAKOUT_ALLOW_TOURNAMENT = 88
+PREDICTION_MIN_SCORE_BUY = 72
+PREDICTION_STRONG_SCORE = 86
+EXPECTED_DRAWDOWN_BLOCK = -0.018
+EXPECTED_DRAWDOWN_WARN = -0.010
 
 # AI Engine 2.0
 SURVIVAL_MIN_CONFIDENCE = 68
@@ -133,22 +143,6 @@ CANDIDATE_MEMORY_BONUS_MAX = 18
 STRATEGY_WINRATE_LOOKBACK = 50
 STRATEGY_WINRATE_BONUS_MAX = 18
 NEWS_TIME_BONUS_MAX = 18
-
-# AI Tournament Engine v4.0
-TOURNAMENT_ENABLED = True
-TOURNAMENT_BUY_THRESHOLD = 82
-TOURNAMENT_WATCH_THRESHOLD = 68
-TOURNAMENT_RISK_BLOCK = 88
-TOURNAMENT_MEMORY_LOOKBACK = 120
-TOURNAMENT_STRATEGY_BONUS_MAX = 18
-
-# Experience Memory / Missed Opportunity Engine v4.5
-EXPERIENCE_CANDIDATE_TOP_N = 20
-EXPERIENCE_EVAL_HOURS = 3
-MISSED_OPPORTUNITY_GAIN = 0.05
-MISSED_OPPORTUNITY_DROP = -0.03
-EXPERIENCE_SCORE_BONUS_MAX = 18
-DAILY_REPORT_HOUR = 0
 
 # Market mode
 TREND_DAY_MIN_BTC_4H = 0.003
@@ -194,7 +188,6 @@ def check_required_env_keys():
     ]:
         if not value:
             missing.append(name)
-
     if missing:
         print("⚠️ .env에 필수 키가 없습니다:", ", ".join(missing))
         return False
@@ -376,12 +369,7 @@ def is_immediate_leader_candidate(result):
         and result.get("relative_strength", 0) >= LEADER_IMMEDIATE_MIN_RS
     )
 
-    tournament_ok = (
-        result.get("tournament_score", 0) >= TOURNAMENT_BUY_THRESHOLD
-        and result.get("ai_risk", 100) <= TOURNAMENT_RISK_BLOCK
-    )
-
-    return ai_ok or leader_ok or tournament_ok
+    return ai_ok or leader_ok
 
 
 def read_recent_sells(limit=50):
@@ -2405,528 +2393,279 @@ def build_survival_candidate(ticker, market_regime, btc_change_4h, performance):
 
 
 
-def init_tournament_log():
-    if not os.path.exists(TOURNAMENT_LOG_FILE):
-        with open(TOURNAMENT_LOG_FILE, "w", newline="") as f:
+def init_entry_zone_log():
+    if not os.path.exists(ENTRY_ZONE_LOG_FILE):
+        with open(ENTRY_ZONE_LOG_FILE, "w", newline="") as f:
             csv.writer(f).writerow([
-                "time", "ticker", "winner", "final_score", "confidence", "risk",
-                "leader", "momentum", "scalp", "reversal", "breakout", "market_mode"
+                "time", "ticker", "current_price", "entry_low", "entry_high",
+                "target_entry", "expected_drawdown", "reason",
+                "ai_confidence", "tournament_score", "prediction_score"
             ])
 
 
-def write_tournament_log(result):
-    init_tournament_log()
-    scores = result.get("tournament_scores", {})
-    with open(TOURNAMENT_LOG_FILE, "a", newline="") as f:
+def write_entry_zone_log(result):
+    init_entry_zone_log()
+    with open(ENTRY_ZONE_LOG_FILE, "a", newline="") as f:
         csv.writer(f).writerow([
             now_text(),
             result.get("ticker", ""),
-            result.get("tournament_winner", ""),
-            round(result.get("tournament_score", 0), 2),
-            round(result.get("ai_confidence", 0), 2),
-            round(result.get("ai_risk", 0), 2),
-            round(scores.get("leader", 0), 2),
-            round(scores.get("momentum", 0), 2),
-            round(scores.get("scalp", 0), 2),
-            round(scores.get("reversal", 0), 2),
-            round(scores.get("breakout", 0), 2),
-            result.get("market_mode", "")
+            result.get("price", ""),
+            result.get("entry_zone_low", ""),
+            result.get("entry_zone_high", ""),
+            result.get("target_entry_price", ""),
+            result.get("expected_drawdown", ""),
+            " | ".join(result.get("entry_zone_reasons", [])),
+            result.get("ai_confidence", ""),
+            result.get("tournament_score", ""),
+            result.get("prediction_score", "")
         ])
 
 
-def get_strategy_experience_bonus(strategy_name):
-    sells = read_recent_sells(TOURNAMENT_MEMORY_LOOKBACK)
-    if not sells:
-        return 0, []
-
-    profits = []
-    for row in sells:
-        s = row.get("strategy", "")
-        if strategy_name in s:
-            profits.append(row.get("profit_rate", 0))
-
-    if len(profits) < 3:
-        return 0, []
-
-    win_rate = len([p for p in profits if p > 0]) / len(profits)
-    avg_profit = sum(profits) / len(profits) * 100
-
-    bonus = (win_rate - 0.5) * 28 + avg_profit * 2.5
-    bonus = clamp(bonus, -TOURNAMENT_STRATEGY_BONUS_MAX, TOURNAMENT_STRATEGY_BONUS_MAX)
-
-    return bonus, [f"{strategy_name}경험 {win_rate*100:.0f}% {bonus:.1f}"]
+def init_prediction_log():
+    if not os.path.exists(PREDICTION_LOG_FILE):
+        with open(PREDICTION_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "ticker", "prediction_score", "prob_2h", "prob_6h",
+                "prob_24h", "expected_return_2h", "expected_return_6h",
+                "expected_return_24h", "reasons"
+            ])
 
 
-def score_leader_strategy(result):
-    score = 40
+def write_prediction_log(result):
+    init_prediction_log()
+    with open(PREDICTION_LOG_FILE, "a", newline="") as f:
+        csv.writer(f).writerow([
+            now_text(),
+            result.get("ticker", ""),
+            round(result.get("prediction_score", 0), 2),
+            round(result.get("prob_2h", 0), 3),
+            round(result.get("prob_6h", 0), 3),
+            round(result.get("prob_24h", 0), 3),
+            round(result.get("expected_return_2h", 0), 5),
+            round(result.get("expected_return_6h", 0), 5),
+            round(result.get("expected_return_24h", 0), 5),
+            " | ".join(result.get("prediction_reasons", []))
+        ])
+
+
+def calculate_atr_like(df, period=14):
+    try:
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = tr1.combine(tr2, max).combine(tr3, max)
+        atr = tr.rolling(period).mean().iloc[-2]
+        price = close.iloc[-2]
+        return float(atr / price) if price > 0 else 0
+    except Exception:
+        return 0
+
+
+def calculate_candidate_prediction(result):
+    score = 50
     reasons = []
+
+    ai_conf = float(result.get("ai_confidence", 0) or 0)
+    risk = float(result.get("ai_risk", 0) or 0)
+    tournament_score = float(result.get("tournament_score", 0) or 0)
+
+    score += (ai_conf - 70) * 0.35
+    score -= max(risk - 45, 0) * 0.25
+    score += (tournament_score - 65) * 0.25
 
     if result.get("leader2_mode"):
-        score += 30
+        score += 10
         reasons.append("Leader2")
     if result.get("weekly_leader_mode"):
-        score += 18
-        reasons.append("7일주도")
-    if result.get("daily_change", 0) >= 0.08:
-        score += 12
-        reasons.append("일봉강세")
-    if result.get("relative_strength", 0) >= 0.03:
-        score += 12
-        reasons.append("RS강함")
-    if result.get("volume_accel", 0) >= 2:
-        score += 10
-        reasons.append("거래량가속")
-    if result.get("rsi", 50) >= 88:
-        score -= 15
-        reasons.append("RSI초과열")
-
-    bonus, exp = get_strategy_experience_bonus("Leader")
-    score += bonus
-    reasons.extend(exp)
-
-    return clamp(score, 0, 100), reasons
-
-
-def score_momentum_strategy(result):
-    score = 40
-    reasons = []
-
-    accel = result.get("momentum_accel", 0)
-    vol_speed = result.get("volume_speed", 0)
-
-    if result.get("change_15m", 0) > 0.005:
-        score += 16
-        reasons.append("15분강세")
-    if result.get("change_1h", 0) > 0.01:
-        score += 12
-        reasons.append("1시간강세")
-    if accel >= 0.006:
-        score += 16
-        reasons.append("모멘텀가속")
-    if vol_speed >= 1.8:
-        score += 10
-        reasons.append("거래량속도")
-    if result.get("macd_positive"):
-        score += 8
-        reasons.append("MACD+")
-
-    bonus, exp = get_strategy_experience_bonus("Momentum")
-    score += bonus
-    reasons.extend(exp)
-
-    return clamp(score, 0, 100), reasons
-
-
-def score_scalp_strategy(result):
-    score = 45
-    reasons = []
-
-    if 0 < result.get("change_15m", 0) < 0.025:
-        score += 12
-        reasons.append("단타상승폭적정")
-    if result.get("volume_accel", 0) >= 1.5:
-        score += 10
-        reasons.append("거래량적정")
-    if 45 <= result.get("rsi", 50) <= 78:
-        score += 10
-        reasons.append("RSI적정")
-    if result.get("ema20_rising"):
-        score += 8
-        reasons.append("EMA상승")
-    if result.get("daily_change", 0) > 0.25:
-        score -= 14
-        reasons.append("일봉과열")
-
-    bonus, exp = get_strategy_experience_bonus("Scalp")
-    score += bonus
-    reasons.extend(exp)
-
-    return clamp(score, 0, 100), reasons
-
-
-def score_reversal_strategy(result):
-    score = 35
-    reasons = []
-
-    if result.get("market_regime") == "bear":
         score += 6
-    if result.get("relative_strength", 0) > 0 and result.get("change_15m", 0) > 0:
-        score += 18
-        reasons.append("하락장상대반등")
-    if result.get("rsi", 50) < 45:
-        score += 12
-        reasons.append("RSI낮음")
-    if result.get("macd_turning"):
-        score += 12
-        reasons.append("MACD전환")
-    if result.get("volume_accel", 0) >= 1.5:
+        reasons.append("7일주도")
+    if result.get("market_mode") == "ALT_TREND":
         score += 8
-        reasons.append("반등거래량")
+        reasons.append("알트추세")
+    elif result.get("market_mode") == "BEAR":
+        score -= 8
+        reasons.append("하락장")
 
-    bonus, exp = get_strategy_experience_bonus("Reversal")
-    score += bonus
-    reasons.extend(exp)
-
-    return clamp(score, 0, 100), reasons
-
-
-def score_breakout_strategy(result):
-    score = 38
-    reasons = []
-
-    if result.get("daily_change", 0) >= 0.04:
-        score += 10
-        reasons.append("일봉돌파")
-    if result.get("weekly_high_dist", 1) <= 0.08 and result.get("leader2_mode"):
-        score += 15
-        reasons.append("7일고점접근리더")
-    if result.get("volume_accel", 0) >= 2.5:
-        score += 14
-        reasons.append("돌파거래량")
     if result.get("relative_strength", 0) >= 0.04:
-        score += 12
-        reasons.append("강한RS")
-    if result.get("rsi", 50) >= 90:
-        score -= 18
-        reasons.append("초과열")
+        score += 8
+        reasons.append("RS강함")
+    elif result.get("relative_strength", 0) < 0:
+        score -= 7
+        reasons.append("RS약함")
 
-    bonus, exp = get_strategy_experience_bonus("Breakout")
-    score += bonus
-    reasons.extend(exp)
+    if result.get("volume_accel", 0) >= 2.5:
+        score += 8
+        reasons.append("거래량강함")
+    elif result.get("volume_accel", 0) < 1.2:
+        score -= 5
+        reasons.append("거래량약함")
 
-    return clamp(score, 0, 100), reasons
+    if result.get("momentum_accel", 0) >= 0.006:
+        score += 7
+        reasons.append("모멘텀가속")
+    elif result.get("momentum_accel", 0) < -0.004:
+        score -= 7
+        reasons.append("모멘텀둔화")
+
+    try:
+        exp_bonus, exp_reasons = get_experience_score_bonus(result)
+        score += exp_bonus * 0.8
+        reasons.extend(exp_reasons)
+    except Exception:
+        pass
+
+    if result.get("rsi", 50) >= 88:
+        score -= 10
+        reasons.append("RSI초과열")
+    elif 50 <= result.get("rsi", 50) <= 75:
+        score += 3
+        reasons.append("RSI적정")
+
+    score = clamp(score, 0, 100)
+
+    prob_2h = clamp(score / 100, 0.05, 0.95)
+    prob_6h = clamp((score - 3) / 100, 0.05, 0.92)
+    prob_24h = clamp((score - 8) / 100, 0.05, 0.88)
+
+    expected_return_2h = (prob_2h - 0.5) * 0.035 + max(result.get("relative_strength", 0), 0) * 0.08
+    expected_return_6h = (prob_6h - 0.5) * 0.055 + max(result.get("change_1h", 0), 0) * 0.45
+    expected_return_24h = (prob_24h - 0.5) * 0.085 + max(result.get("daily_change", 0), 0) * 0.12
+
+    result["prediction_score"] = score
+    result["prob_2h"] = prob_2h
+    result["prob_6h"] = prob_6h
+    result["prob_24h"] = prob_24h
+    result["expected_return_2h"] = expected_return_2h
+    result["expected_return_6h"] = expected_return_6h
+    result["expected_return_24h"] = expected_return_24h
+    result["prediction_reasons"] = reasons
+
+    result["rank_score"] += score * 0.9 + expected_return_2h * 900
+
+    if score >= PREDICTION_STRONG_SCORE:
+        result["strategy"] += f" + 예측강함({score:.0f})"
+    elif score >= PREDICTION_MIN_SCORE_BUY:
+        result["strategy"] += f" + 예측양호({score:.0f})"
+    else:
+        result["strategy"] += f" + 예측약함({score:.0f})"
+
+    write_prediction_log(result)
+    return result
 
 
-def apply_tournament_engine(results):
-    if not TOURNAMENT_ENABLED:
-        return results
+def calculate_dynamic_entry_zone(result):
+    ticker = result.get("ticker")
+    price = float(result.get("price", 0) or 0)
+    if not ticker or price <= 0:
+        return result
 
-    upgraded = []
+    reasons = []
+    try:
+        df = pyupbit.get_ohlcv(ticker, interval="minute5", count=max(ENTRY_ZONE_LOOKBACK, 30))
+        if df is None or len(df) < 30:
+            discount = ENTRY_ZONE_MIN_DISCOUNT
+            result["entry_zone_low"] = price * (1 - discount * 1.5)
+            result["entry_zone_high"] = price
+            result["target_entry_price"] = price * (1 - discount)
+            result["expected_drawdown"] = -discount
+            result["entry_zone_reasons"] = ["데이터부족 기본존"]
+            return result
 
-    for r in results:
-        leader_score, leader_reasons = score_leader_strategy(r)
-        momentum_score, momentum_reasons = score_momentum_strategy(r)
-        scalp_score, scalp_reasons = score_scalp_strategy(r)
-        reversal_score, reversal_reasons = score_reversal_strategy(r)
-        breakout_score, breakout_reasons = score_breakout_strategy(r)
+        recent_high = float(df["high"].iloc[-12:-2].max())
+        recent_low = float(df["low"].iloc[-12:-2].min())
+        ma5 = float(df["close"].rolling(5).mean().iloc[-2])
+        ma20 = float(df["close"].rolling(20).mean().iloc[-2])
+        atr_rate = calculate_atr_like(df)
 
-        scores = {
-            "Leader": leader_score,
-            "Momentum": momentum_score,
-            "Scalp": scalp_score,
-            "Reversal": reversal_score,
-            "Breakout": breakout_score,
-        }
+        ai_conf = float(result.get("ai_confidence", 0) or 0)
+        tournament_score = float(result.get("tournament_score", 0) or 0)
+        prediction_score = float(result.get("prediction_score", 0) or 0)
+        leader = result.get("leader2_mode", False)
 
-        winner = max(scores, key=scores.get)
-        winner_score = scores[winner]
+        discount = clamp(atr_rate * ENTRY_ZONE_ATR_MULTIPLIER, ENTRY_ZONE_MIN_DISCOUNT, ENTRY_ZONE_MAX_DISCOUNT)
 
-        reasons_map = {
-            "Leader": leader_reasons,
-            "Momentum": momentum_reasons,
-            "Scalp": scalp_reasons,
-            "Reversal": reversal_reasons,
-            "Breakout": breakout_reasons,
-        }
-
-        r["tournament_winner"] = winner
-        r["tournament_score"] = winner_score
-        r["tournament_scores"] = {
-            "leader": leader_score,
-            "momentum": momentum_score,
-            "scalp": scalp_score,
-            "reversal": reversal_score,
-            "breakout": breakout_score,
-        }
-        r["tournament_reasons"] = reasons_map[winner]
-
-        # Tournament is additive, not a hard filter
-        r["rank_score"] += winner_score * 1.1
-
-        if winner_score >= TOURNAMENT_BUY_THRESHOLD:
-            r["strategy"] += f" + {winner}승리({winner_score:.0f})"
-            r["ai_confidence"] = min(100, r.get("ai_confidence", 0) + 8)
-        elif winner_score >= TOURNAMENT_WATCH_THRESHOLD:
-            r["strategy"] += f" + {winner}관찰({winner_score:.0f})"
-            r["ai_confidence"] = min(100, r.get("ai_confidence", 0) + 3)
+        if leader or ai_conf >= 90 or tournament_score >= 85:
+            discount *= 0.55
+            reasons.append("강한후보 얕은진입존")
+        elif result.get("market_mode") in ["ALT_TREND", "TREND"]:
+            discount *= 0.75
+            reasons.append("추세장 얕은진입존")
         else:
-            r["strategy"] += f" + 토너먼트약함({winner_score:.0f})"
+            discount *= 1.10
+            reasons.append("일반/횡보 깊은진입존")
 
-        write_tournament_log(r)
+        discount = clamp(discount, ENTRY_ZONE_MIN_DISCOUNT, ENTRY_ZONE_MAX_DISCOUNT)
+        target = price * (1 - discount)
+
+        supports = [x for x in [ma5, ma20, recent_low * 1.003] if x and x > 0 and x < price]
+        if supports:
+            nearest = min(supports, key=lambda x: abs(price - x))
+            target = (target + nearest) / 2
+            reasons.append("근처지지선반영")
+
+        breakout_allowed = (
+            ai_conf >= ENTRY_ZONE_BREAKOUT_ALLOW_CONFIDENCE
+            or tournament_score >= ENTRY_ZONE_BREAKOUT_ALLOW_TOURNAMENT
+            or prediction_score >= PREDICTION_STRONG_SCORE
+        )
+        if breakout_allowed and result.get("change_15m", 0) > 0 and result.get("volume_accel", 0) >= 2:
+            target = max(target, price * 0.9985)
+            reasons.append("강신호 돌파진입허용")
+
+        entry_high = min(target * 1.002, price * 1.001)
+        entry_low = max(target * 0.997, price * (1 - ENTRY_ZONE_MAX_DISCOUNT * 1.3))
+        expected_drawdown = (min(recent_low, target) - price) / price if recent_low > 0 else -discount
+
+        result["entry_zone_low"] = entry_low
+        result["entry_zone_high"] = entry_high
+        result["target_entry_price"] = target
+        result["expected_drawdown"] = expected_drawdown
+        result["entry_zone_reasons"] = reasons
+
+        write_entry_zone_log(result)
+        return result
+
+    except Exception as e:
+        print(f"{ticker} Dynamic Entry Zone 오류:", e)
+        discount = ENTRY_ZONE_MIN_DISCOUNT
+        result["entry_zone_low"] = price * (1 - discount * 1.5)
+        result["entry_zone_high"] = price
+        result["target_entry_price"] = price * (1 - discount)
+        result["expected_drawdown"] = -discount
+        result["entry_zone_reasons"] = ["오류 기본존"]
+        return result
+
+
+def apply_prediction_and_entry_zone(results):
+    upgraded = []
+    for r in results:
+        r = calculate_candidate_prediction(r)
+        r = calculate_dynamic_entry_zone(r)
+
+        dd = float(r.get("expected_drawdown", 0) or 0)
+        if dd <= EXPECTED_DRAWDOWN_BLOCK and not r.get("leader2_mode"):
+            r["ai_risk"] = min(100, r.get("ai_risk", 0) + 18)
+            r["rank_score"] -= 25
+            r["strategy"] += " + 예상하락위험"
+        elif dd <= EXPECTED_DRAWDOWN_WARN:
+            r["ai_risk"] = min(100, r.get("ai_risk", 0) + 7)
+            r["strategy"] += " + 예상하락주의"
+
         upgraded.append(r)
 
-    upgraded = sorted(
+    return sorted(
         upgraded,
         key=lambda x: (
-            x.get("tournament_score", 0),
+            x.get("prediction_score", 0),
             x.get("ai_confidence", 0) - x.get("ai_risk", 0) * 0.35,
             x.get("rank_score", 0)
         ),
         reverse=True
     )
-
-    return upgraded
-
-
-
-def init_experience_candidates_log():
-    if not os.path.exists(EXPERIENCE_CANDIDATES_FILE):
-        with open(EXPERIENCE_CANDIDATES_FILE, "w", newline="") as f:
-            csv.writer(f).writerow([
-                "time", "eval_time", "evaluated", "bought",
-                "ticker", "rank_position", "price", "market_regime", "market_mode",
-                "strategy", "ai_confidence", "ai_risk", "expected_profit",
-                "tournament_winner", "tournament_score", "rank_score",
-                "relative_strength", "change_15m", "change_1h",
-                "volume_accel", "rsi", "daily_change"
-            ])
-
-
-def log_experience_candidates(results, bought_ticker=""):
-    init_experience_candidates_log()
-    now_ts = time.time()
-    eval_ts = now_ts + EXPERIENCE_EVAL_HOURS * 3600
-
-    with open(EXPERIENCE_CANDIDATES_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        for i, r in enumerate(results[:EXPERIENCE_CANDIDATE_TOP_N], start=1):
-            writer.writerow([
-                now_text(),
-                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(eval_ts)),
-                "0",
-                "1" if r.get("ticker") == bought_ticker else "0",
-                r.get("ticker", ""),
-                i,
-                r.get("price", ""),
-                r.get("market_regime", ""),
-                r.get("market_mode", ""),
-                r.get("strategy", ""),
-                round(r.get("ai_confidence", 0), 2),
-                round(r.get("ai_risk", 0), 2),
-                round(r.get("expected_profit", 0), 5),
-                r.get("tournament_winner", ""),
-                round(r.get("tournament_score", 0), 2),
-                round(r.get("rank_score", 0), 2),
-                round(r.get("relative_strength", 0), 5),
-                round(r.get("change_15m", 0), 5),
-                round(r.get("change_1h", 0), 5),
-                round(r.get("volume_accel", 0), 3),
-                round(r.get("rsi", 0), 2),
-                round(r.get("daily_change", 0), 5),
-            ])
-
-
-def init_missed_opportunity_log():
-    if not os.path.exists(MISSED_OPPORTUNITY_FILE):
-        with open(MISSED_OPPORTUNITY_FILE, "w", newline="") as f:
-            csv.writer(f).writerow([
-                "time", "original_time", "ticker", "bought",
-                "entry_price", "eval_price", "future_return",
-                "label", "rank_position", "ai_confidence",
-                "ai_risk", "strategy", "tournament_winner"
-            ])
-
-
-def write_missed_opportunity(row, eval_price, future_return, label):
-    init_missed_opportunity_log()
-    with open(MISSED_OPPORTUNITY_FILE, "a", newline="") as f:
-        csv.writer(f).writerow([
-            now_text(),
-            row.get("time", ""),
-            row.get("ticker", ""),
-            row.get("bought", ""),
-            row.get("price", ""),
-            eval_price,
-            round(future_return, 5),
-            label,
-            row.get("rank_position", ""),
-            row.get("ai_confidence", ""),
-            row.get("ai_risk", ""),
-            row.get("strategy", ""),
-            row.get("tournament_winner", "")
-        ])
-
-
-def evaluate_pending_experience_candidates():
-    if not os.path.exists(EXPERIENCE_CANDIDATES_FILE):
-        return
-
-    try:
-        with open(EXPERIENCE_CANDIDATES_FILE, "r") as f:
-            rows = list(csv.DictReader(f))
-    except Exception as e:
-        print("Experience 후보 읽기 오류:", e)
-        return
-
-    changed = False
-    now_dt = datetime.now()
-    updated_rows = []
-
-    for row in rows:
-        if row.get("evaluated") == "1":
-            updated_rows.append(row)
-            continue
-
-        try:
-            eval_time = datetime.strptime(row.get("eval_time", ""), "%Y-%m-%d %H:%M:%S")
-            if now_dt < eval_time:
-                updated_rows.append(row)
-                continue
-
-            ticker = row.get("ticker", "")
-            entry_price = float(row.get("price", 0))
-            if not ticker or entry_price <= 0:
-                row["evaluated"] = "1"
-                updated_rows.append(row)
-                changed = True
-                continue
-
-            eval_price = pyupbit.get_current_price(ticker)
-            if not eval_price:
-                updated_rows.append(row)
-                continue
-
-            future_return = (eval_price - entry_price) / entry_price
-
-            if future_return >= MISSED_OPPORTUNITY_GAIN and row.get("bought") != "1":
-                label = "MISSED_BIG_GAIN"
-            elif future_return <= MISSED_OPPORTUNITY_DROP and row.get("bought") != "1":
-                label = "GOOD_SKIP"
-            elif future_return >= 0.02 and row.get("bought") == "1":
-                label = "BOUGHT_GOOD"
-            elif future_return <= -0.02 and row.get("bought") == "1":
-                label = "BOUGHT_BAD"
-            else:
-                label = "NEUTRAL"
-
-            write_missed_opportunity(row, eval_price, future_return, label)
-            row["evaluated"] = "1"
-            changed = True
-            updated_rows.append(row)
-
-        except Exception as e:
-            print("후보 경험 평가 오류:", e)
-            updated_rows.append(row)
-
-    if changed:
-        with open(EXPERIENCE_CANDIDATES_FILE, "w", newline="") as f:
-            if updated_rows:
-                writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
-                writer.writeheader()
-                writer.writerows(updated_rows)
-
-
-def get_experience_score_bonus(result):
-    if not os.path.exists(MISSED_OPPORTUNITY_FILE):
-        return 0, []
-
-    try:
-        with open(MISSED_OPPORTUNITY_FILE, "r") as f:
-            rows = list(csv.DictReader(f))[-500:]
-    except Exception as e:
-        print("Experience score 읽기 오류:", e)
-        return 0, []
-
-    ticker = result.get("ticker", "")
-    strategy_base = result.get("strategy", "").split(" + ")[0]
-    tournament = result.get("tournament_winner", "")
-
-    bonus = 0
-    reasons = []
-
-    similar = []
-    for row in rows:
-        score = 0
-
-        if row.get("ticker") == ticker:
-            score += 2
-        if strategy_base and strategy_base in row.get("strategy", ""):
-            score += 2
-        if tournament and row.get("tournament_winner") == tournament:
-            score += 2
-
-        try:
-            old_conf = float(row.get("ai_confidence", 0))
-            new_conf = float(result.get("ai_confidence", 0))
-            if abs(old_conf - new_conf) <= 10:
-                score += 1
-        except Exception:
-            pass
-
-        if score >= 3:
-            similar.append(row)
-
-    if len(similar) >= 3:
-        values = []
-        for row in similar:
-            try:
-                values.append(float(row.get("future_return", 0)))
-            except Exception:
-                pass
-
-        if values:
-            win_rate = len([v for v in values if v > 0]) / len(values)
-            avg = sum(values) / len(values) * 100
-            b = (win_rate - 0.5) * 25 + avg * 2
-            b = clamp(b, -EXPERIENCE_SCORE_BONUS_MAX, EXPERIENCE_SCORE_BONUS_MAX)
-            bonus += b
-            reasons.append(f"경험점수 {len(values)}건 {b:.1f}")
-
-    return bonus, reasons
-
-
-def generate_daily_ai_report():
-    today = time.strftime("%Y-%m-%d")
-
-    sells = read_recent_sells(200)
-    today_sells = [s for s in sells if s.get("time", "").startswith(today)]
-
-    total = len(today_sells)
-    wins = len([s for s in today_sells if s.get("profit_rate", 0) > 0])
-    total_profit = sum([s.get("profit_rate", 0) for s in today_sells]) * 100
-
-    missed = []
-    good_skips = []
-
-    if os.path.exists(MISSED_OPPORTUNITY_FILE):
-        try:
-            with open(MISSED_OPPORTUNITY_FILE, "r") as f:
-                rows = list(csv.DictReader(f))
-            for r in rows:
-                if r.get("time", "").startswith(today):
-                    if r.get("label") == "MISSED_BIG_GAIN":
-                        missed.append(r)
-                    elif r.get("label") == "GOOD_SKIP":
-                        good_skips.append(r)
-        except Exception:
-            pass
-
-    win_rate = (wins / total * 100) if total else 0
-
-    lines = []
-    lines.append(f"===== Daily AI Report {today} =====")
-    lines.append(f"거래 수: {total}")
-    lines.append(f"승률: {win_rate:.1f}%")
-    lines.append(f"총 수익률 합계: {total_profit:.2f}%")
-    lines.append(f"놓친 큰 기회: {len(missed)}개")
-    lines.append(f"잘 피한 후보: {len(good_skips)}개")
-
-    if missed:
-        lines.append("")
-        lines.append("상위 놓친 기회:")
-        missed_sorted = sorted(missed, key=lambda x: float(x.get("future_return", 0)), reverse=True)
-        for r in missed_sorted[:10]:
-            lines.append(
-                f"- {r.get('ticker')} | {float(r.get('future_return', 0))*100:.2f}% | "
-                f"AI {r.get('ai_confidence')} | {r.get('strategy')}"
-            )
-
-    report = "\n".join(lines)
-
-    with open(DAILY_REPORT_FILE, "w") as f:
-        f.write(report)
-
-    print(report)
 
 
 def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
@@ -3034,17 +2773,15 @@ def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
 
     # AI Decision Engine: 조건 탈락보다 종합 점수로 재평가
     results = apply_ai_decision_engine(results, market_mode)
-    results = apply_tournament_engine(results)
     write_rank_history(results)
     update_candidate_memory(results)
-    log_experience_candidates(results)
 
     print(f"통과 코인 수: {len(results)}")
     print("===== AI 후보 랭킹 =====")
 
     for r in results[:10]:
         print(
-            f"{r['ticker']} | AI {r.get('ai_confidence', 0):.1f} | 위험 {r.get('ai_risk', 0):.1f} | 예상 {r.get('expected_profit', 0)*100:.2f}% | 토너먼트 {r.get('tournament_winner', '')}:{r.get('tournament_score', 0):.1f} | "
+            f"{r['ticker']} | AI {r.get('ai_confidence', 0):.1f} | 위험 {r.get('ai_risk', 0):.1f} | 예상 {r.get('expected_profit', 0)*100:.2f}% | "
             f"점수 {r['score']} | 랭크 {r['rank_score']:.2f} | "
             f"{r['strategy']} | CG {r.get('coingecko_bonus', 0):.1f} | "
             f"학습 {r.get('learning_bonus', 0):.1f} | "
@@ -3106,7 +2843,6 @@ def is_flexible_leader_watch(item):
     return (
         item.get("leader2_mode", False)
         or item.get("ai_confidence", 0) >= AI_CONFIDENCE_BUY_THRESHOLD
-        or item.get("tournament_score", 0) >= TOURNAMENT_BUY_THRESHOLD
         or (
             item.get("daily_change", 0) >= LEADER_NO_PULLBACK_DAILY_CHANGE
             and item.get("relative_strength", 0) >= LEADER_NO_PULLBACK_RS
@@ -3140,8 +2876,11 @@ def make_watch_item(best):
         "ai_risk": best.get("ai_risk", 0),
         "expected_profit": best.get("expected_profit", 0),
         "market_mode": best.get("market_mode", ""),
-        "tournament_winner": best.get("tournament_winner", ""),
-        "tournament_score": best.get("tournament_score", 0),
+        "prediction_score": best.get("prediction_score", 0),
+        "entry_zone_low": best.get("entry_zone_low", 0),
+        "entry_zone_high": best.get("entry_zone_high", 0),
+        "target_entry_price": best.get("target_entry_price", 0),
+        "expected_drawdown": best.get("expected_drawdown", 0),
         "watch_price": price,
         "watch_low": price,
         "watch_low_time": time.time(),
@@ -3263,6 +3002,20 @@ def check_watch_signal(state, performance):
         if elapsed < SIGNAL_CONFIRM_SECONDS:
             kept_items.append(item)
             continue
+
+        # Dynamic Entry Zone: AI가 계산한 진입 구간 안에서 매수 우선
+        entry_zone_low = float(item.get("entry_zone_low", 0) or 0)
+        entry_zone_high = float(item.get("entry_zone_high", 0) or 0)
+        prediction_score = float(item.get("prediction_score", 0) or 0)
+
+        if DYNAMIC_ENTRY_ENABLED and entry_zone_low > 0 and entry_zone_high > 0:
+            if entry_zone_low <= current_price <= entry_zone_high:
+                print(f"{watch_ticker} Dynamic Entry Zone 진입 → 매수 검토")
+                item["watch_had_pullback"] = True
+            elif current_price > entry_zone_high and prediction_score < PREDICTION_STRONG_SCORE:
+                print(f"{watch_ticker} 진입존보다 비쌈 → 대기 | zone {entry_zone_low:.3f}~{entry_zone_high:.3f}")
+                kept_items.append(item)
+                continue
 
         # 일반 후보는 추격 금지. 주도주는 더 넓게 허용.
         max_above = LEADER_MAX_BUY_ABOVE_WATCH_PRICE if leader_flexible else MAX_BUY_ABOVE_WATCH_PRICE
@@ -3625,12 +3378,7 @@ def manage_holding(ticker, state):
 # MAIN LOOP
 # =========================
 def main():
-    print("Upbit Experience Memory v4.5 시작")
-
-    if not check_required_env_keys():
-        return
-
-    evaluate_pending_experience_candidates()
+    print("Upbit AI Decision Engine 2.0 + 후보생존 봇 시작")
 
     init_trade_log()
     analyze_trade_log()
