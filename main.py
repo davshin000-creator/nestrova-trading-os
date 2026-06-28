@@ -111,6 +111,8 @@ AI_DECISION_LOG_FILE = "ai_decision_log.csv"
 RANK_HISTORY_FILE = "rank_history.csv"
 CANDIDATE_MEMORY_FILE = "candidate_memory.json"
 EXTERNAL_NEWS_FILE = "external_news.csv"  # optional: time,ticker,sentiment,impact
+TOURNAMENT_LOG_FILE = "tournament_log.csv"
+EXPERIENCE_MEMORY_FILE = "experience_memory.json"
 
 # AI Decision Engine
 AI_CONFIDENCE_BUY_THRESHOLD = 86
@@ -128,6 +130,14 @@ CANDIDATE_MEMORY_BONUS_MAX = 18
 STRATEGY_WINRATE_LOOKBACK = 50
 STRATEGY_WINRATE_BONUS_MAX = 18
 NEWS_TIME_BONUS_MAX = 18
+
+# AI Tournament Engine v4.0
+TOURNAMENT_ENABLED = True
+TOURNAMENT_BUY_THRESHOLD = 82
+TOURNAMENT_WATCH_THRESHOLD = 68
+TOURNAMENT_RISK_BLOCK = 88
+TOURNAMENT_MEMORY_LOOKBACK = 120
+TOURNAMENT_STRATEGY_BONUS_MAX = 18
 
 # Market mode
 TREND_DAY_MIN_BTC_4H = 0.003
@@ -176,9 +186,7 @@ def check_required_env_keys():
 
     if missing:
         print("⚠️ .env에 필수 키가 없습니다:", ", ".join(missing))
-        print("예: UPBIT_ACCESS_KEY=xxxx")
         return False
-
     return True
 
 
@@ -357,7 +365,12 @@ def is_immediate_leader_candidate(result):
         and result.get("relative_strength", 0) >= LEADER_IMMEDIATE_MIN_RS
     )
 
-    return ai_ok or leader_ok
+    tournament_ok = (
+        result.get("tournament_score", 0) >= TOURNAMENT_BUY_THRESHOLD
+        and result.get("ai_risk", 100) <= TOURNAMENT_RISK_BLOCK
+    )
+
+    return ai_ok or leader_ok or tournament_ok
 
 
 def read_recent_sells(limit=50):
@@ -2380,6 +2393,270 @@ def build_survival_candidate(ticker, market_regime, btc_change_4h, performance):
         return None
 
 
+
+def init_tournament_log():
+    if not os.path.exists(TOURNAMENT_LOG_FILE):
+        with open(TOURNAMENT_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "ticker", "winner", "final_score", "confidence", "risk",
+                "leader", "momentum", "scalp", "reversal", "breakout", "market_mode"
+            ])
+
+
+def write_tournament_log(result):
+    init_tournament_log()
+    scores = result.get("tournament_scores", {})
+    with open(TOURNAMENT_LOG_FILE, "a", newline="") as f:
+        csv.writer(f).writerow([
+            now_text(),
+            result.get("ticker", ""),
+            result.get("tournament_winner", ""),
+            round(result.get("tournament_score", 0), 2),
+            round(result.get("ai_confidence", 0), 2),
+            round(result.get("ai_risk", 0), 2),
+            round(scores.get("leader", 0), 2),
+            round(scores.get("momentum", 0), 2),
+            round(scores.get("scalp", 0), 2),
+            round(scores.get("reversal", 0), 2),
+            round(scores.get("breakout", 0), 2),
+            result.get("market_mode", "")
+        ])
+
+
+def get_strategy_experience_bonus(strategy_name):
+    sells = read_recent_sells(TOURNAMENT_MEMORY_LOOKBACK)
+    if not sells:
+        return 0, []
+
+    profits = []
+    for row in sells:
+        s = row.get("strategy", "")
+        if strategy_name in s:
+            profits.append(row.get("profit_rate", 0))
+
+    if len(profits) < 3:
+        return 0, []
+
+    win_rate = len([p for p in profits if p > 0]) / len(profits)
+    avg_profit = sum(profits) / len(profits) * 100
+
+    bonus = (win_rate - 0.5) * 28 + avg_profit * 2.5
+    bonus = clamp(bonus, -TOURNAMENT_STRATEGY_BONUS_MAX, TOURNAMENT_STRATEGY_BONUS_MAX)
+
+    return bonus, [f"{strategy_name}경험 {win_rate*100:.0f}% {bonus:.1f}"]
+
+
+def score_leader_strategy(result):
+    score = 40
+    reasons = []
+
+    if result.get("leader2_mode"):
+        score += 30
+        reasons.append("Leader2")
+    if result.get("weekly_leader_mode"):
+        score += 18
+        reasons.append("7일주도")
+    if result.get("daily_change", 0) >= 0.08:
+        score += 12
+        reasons.append("일봉강세")
+    if result.get("relative_strength", 0) >= 0.03:
+        score += 12
+        reasons.append("RS강함")
+    if result.get("volume_accel", 0) >= 2:
+        score += 10
+        reasons.append("거래량가속")
+    if result.get("rsi", 50) >= 88:
+        score -= 15
+        reasons.append("RSI초과열")
+
+    bonus, exp = get_strategy_experience_bonus("Leader")
+    score += bonus
+    reasons.extend(exp)
+
+    return clamp(score, 0, 100), reasons
+
+
+def score_momentum_strategy(result):
+    score = 40
+    reasons = []
+
+    accel = result.get("momentum_accel", 0)
+    vol_speed = result.get("volume_speed", 0)
+
+    if result.get("change_15m", 0) > 0.005:
+        score += 16
+        reasons.append("15분강세")
+    if result.get("change_1h", 0) > 0.01:
+        score += 12
+        reasons.append("1시간강세")
+    if accel >= 0.006:
+        score += 16
+        reasons.append("모멘텀가속")
+    if vol_speed >= 1.8:
+        score += 10
+        reasons.append("거래량속도")
+    if result.get("macd_positive"):
+        score += 8
+        reasons.append("MACD+")
+
+    bonus, exp = get_strategy_experience_bonus("Momentum")
+    score += bonus
+    reasons.extend(exp)
+
+    return clamp(score, 0, 100), reasons
+
+
+def score_scalp_strategy(result):
+    score = 45
+    reasons = []
+
+    if 0 < result.get("change_15m", 0) < 0.025:
+        score += 12
+        reasons.append("단타상승폭적정")
+    if result.get("volume_accel", 0) >= 1.5:
+        score += 10
+        reasons.append("거래량적정")
+    if 45 <= result.get("rsi", 50) <= 78:
+        score += 10
+        reasons.append("RSI적정")
+    if result.get("ema20_rising"):
+        score += 8
+        reasons.append("EMA상승")
+    if result.get("daily_change", 0) > 0.25:
+        score -= 14
+        reasons.append("일봉과열")
+
+    bonus, exp = get_strategy_experience_bonus("Scalp")
+    score += bonus
+    reasons.extend(exp)
+
+    return clamp(score, 0, 100), reasons
+
+
+def score_reversal_strategy(result):
+    score = 35
+    reasons = []
+
+    if result.get("market_regime") == "bear":
+        score += 6
+    if result.get("relative_strength", 0) > 0 and result.get("change_15m", 0) > 0:
+        score += 18
+        reasons.append("하락장상대반등")
+    if result.get("rsi", 50) < 45:
+        score += 12
+        reasons.append("RSI낮음")
+    if result.get("macd_turning"):
+        score += 12
+        reasons.append("MACD전환")
+    if result.get("volume_accel", 0) >= 1.5:
+        score += 8
+        reasons.append("반등거래량")
+
+    bonus, exp = get_strategy_experience_bonus("Reversal")
+    score += bonus
+    reasons.extend(exp)
+
+    return clamp(score, 0, 100), reasons
+
+
+def score_breakout_strategy(result):
+    score = 38
+    reasons = []
+
+    if result.get("daily_change", 0) >= 0.04:
+        score += 10
+        reasons.append("일봉돌파")
+    if result.get("weekly_high_dist", 1) <= 0.08 and result.get("leader2_mode"):
+        score += 15
+        reasons.append("7일고점접근리더")
+    if result.get("volume_accel", 0) >= 2.5:
+        score += 14
+        reasons.append("돌파거래량")
+    if result.get("relative_strength", 0) >= 0.04:
+        score += 12
+        reasons.append("강한RS")
+    if result.get("rsi", 50) >= 90:
+        score -= 18
+        reasons.append("초과열")
+
+    bonus, exp = get_strategy_experience_bonus("Breakout")
+    score += bonus
+    reasons.extend(exp)
+
+    return clamp(score, 0, 100), reasons
+
+
+def apply_tournament_engine(results):
+    if not TOURNAMENT_ENABLED:
+        return results
+
+    upgraded = []
+
+    for r in results:
+        leader_score, leader_reasons = score_leader_strategy(r)
+        momentum_score, momentum_reasons = score_momentum_strategy(r)
+        scalp_score, scalp_reasons = score_scalp_strategy(r)
+        reversal_score, reversal_reasons = score_reversal_strategy(r)
+        breakout_score, breakout_reasons = score_breakout_strategy(r)
+
+        scores = {
+            "Leader": leader_score,
+            "Momentum": momentum_score,
+            "Scalp": scalp_score,
+            "Reversal": reversal_score,
+            "Breakout": breakout_score,
+        }
+
+        winner = max(scores, key=scores.get)
+        winner_score = scores[winner]
+
+        reasons_map = {
+            "Leader": leader_reasons,
+            "Momentum": momentum_reasons,
+            "Scalp": scalp_reasons,
+            "Reversal": reversal_reasons,
+            "Breakout": breakout_reasons,
+        }
+
+        r["tournament_winner"] = winner
+        r["tournament_score"] = winner_score
+        r["tournament_scores"] = {
+            "leader": leader_score,
+            "momentum": momentum_score,
+            "scalp": scalp_score,
+            "reversal": reversal_score,
+            "breakout": breakout_score,
+        }
+        r["tournament_reasons"] = reasons_map[winner]
+
+        # Tournament is additive, not a hard filter
+        r["rank_score"] += winner_score * 1.1
+
+        if winner_score >= TOURNAMENT_BUY_THRESHOLD:
+            r["strategy"] += f" + {winner}승리({winner_score:.0f})"
+            r["ai_confidence"] = min(100, r.get("ai_confidence", 0) + 8)
+        elif winner_score >= TOURNAMENT_WATCH_THRESHOLD:
+            r["strategy"] += f" + {winner}관찰({winner_score:.0f})"
+            r["ai_confidence"] = min(100, r.get("ai_confidence", 0) + 3)
+        else:
+            r["strategy"] += f" + 토너먼트약함({winner_score:.0f})"
+
+        write_tournament_log(r)
+        upgraded.append(r)
+
+    upgraded = sorted(
+        upgraded,
+        key=lambda x: (
+            x.get("tournament_score", 0),
+            x.get("ai_confidence", 0) - x.get("ai_risk", 0) * 0.35,
+            x.get("rank_score", 0)
+        ),
+        reverse=True
+    )
+
+    return upgraded
+
+
 def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
     learning = get_auto_learning_adjustments()
     advanced_learning = get_advanced_learning_adjustments()
@@ -2485,6 +2762,7 @@ def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
 
     # AI Decision Engine: 조건 탈락보다 종합 점수로 재평가
     results = apply_ai_decision_engine(results, market_mode)
+    results = apply_tournament_engine(results)
     write_rank_history(results)
     update_candidate_memory(results)
 
@@ -2493,7 +2771,7 @@ def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
 
     for r in results[:10]:
         print(
-            f"{r['ticker']} | AI {r.get('ai_confidence', 0):.1f} | 위험 {r.get('ai_risk', 0):.1f} | 예상 {r.get('expected_profit', 0)*100:.2f}% | "
+            f"{r['ticker']} | AI {r.get('ai_confidence', 0):.1f} | 위험 {r.get('ai_risk', 0):.1f} | 예상 {r.get('expected_profit', 0)*100:.2f}% | 토너먼트 {r.get('tournament_winner', '')}:{r.get('tournament_score', 0):.1f} | "
             f"점수 {r['score']} | 랭크 {r['rank_score']:.2f} | "
             f"{r['strategy']} | CG {r.get('coingecko_bonus', 0):.1f} | "
             f"학습 {r.get('learning_bonus', 0):.1f} | "
@@ -2555,6 +2833,7 @@ def is_flexible_leader_watch(item):
     return (
         item.get("leader2_mode", False)
         or item.get("ai_confidence", 0) >= AI_CONFIDENCE_BUY_THRESHOLD
+        or item.get("tournament_score", 0) >= TOURNAMENT_BUY_THRESHOLD
         or (
             item.get("daily_change", 0) >= LEADER_NO_PULLBACK_DAILY_CHANGE
             and item.get("relative_strength", 0) >= LEADER_NO_PULLBACK_RS
@@ -2588,6 +2867,8 @@ def make_watch_item(best):
         "ai_risk": best.get("ai_risk", 0),
         "expected_profit": best.get("expected_profit", 0),
         "market_mode": best.get("market_mode", ""),
+        "tournament_winner": best.get("tournament_winner", ""),
+        "tournament_score": best.get("tournament_score", 0),
         "watch_price": price,
         "watch_low": price,
         "watch_low_time": time.time(),
@@ -3071,7 +3352,7 @@ def manage_holding(ticker, state):
 # MAIN LOOP
 # =========================
 def main():
-    print("Upbit AI Decision Engine 2.0 + 후보생존 봇 시작")
+    print("Upbit AI Tournament Engine v4.0 시작")
 
     if not check_required_env_keys():
         return
