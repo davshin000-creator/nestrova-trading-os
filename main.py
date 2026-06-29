@@ -112,6 +112,10 @@ STRATEGY_AI_LOG_FILE = "strategy_ai_log.csv"
 EXPECTED_VALUE_LOG_FILE = "expected_value_log.csv"
 STRATEGY_MEMORY_FILE = "strategy_memory.json"
 MARKET_BRAIN_FILE = "market_brain_log.csv"
+PORTFOLIO_AI_LOG_FILE = "portfolio_ai_log.csv"
+SIMULATION_LOG_FILE = "simulation_log.csv"
+EVOLUTION_LOG_FILE = "evolution_log.csv"
+STRATEGY_WEIGHT_FILE = "strategy_weights.json"
 ENTRY_ZONE_LOG_FILE = "entry_zone_log.csv"
 PREDICTION_LOG_FILE = "candidate_prediction_log.csv"
 AUTO_TUNING_FILE = "auto_tuning_state.json"
@@ -168,6 +172,24 @@ STRATEGY_MEMORY_LOOKBACK = 120
 STRATEGY_MEMORY_MIN_TRADES = 3
 STRATEGY_EV_BONUS_MAX = 18
 MARKET_BRAIN_RISK_OFF_PENALTY = 16
+
+# v6.1~6.3 Portfolio AI / Simulation / Evolution
+PORTFOLIO_AI_ENABLED = True
+SIMULATION_ENGINE_ENABLED = True
+EVOLUTION_ENGINE_ENABLED = True
+PORTFOLIO_TOP_N = 3
+PORTFOLIO_MIN_EV = 0.003
+PORTFOLIO_MIN_SCORE = 70
+PORTFOLIO_SINGLE_POSITION_MODE = True
+SIMULATION_LOOKBACK_ROWS = 500
+SIMULATION_MIN_SIMILAR = 5
+SIMULATION_PASS_EV = 0.0025
+SIMULATION_FAIL_PENALTY = 20
+EVOLUTION_LOOKBACK = 150
+EVOLUTION_MIN_TRADES = 4
+EVOLUTION_WEIGHT_STEP = 0.08
+EVOLUTION_MAX_WEIGHT = 1.6
+EVOLUTION_MIN_WEIGHT = 0.45
 
 # AI Engine 2.0
 SURVIVAL_MIN_CONFIDENCE = 68
@@ -3528,6 +3550,225 @@ def apply_strategy_ai_engine(results, market_regime, btc_change_4h):
     )
 
 
+
+def init_portfolio_ai_log():
+    if not os.path.exists(PORTFOLIO_AI_LOG_FILE):
+        with open(PORTFOLIO_AI_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "rank", "ticker", "weight", "portfolio_score",
+                "ev", "ai_confidence", "prediction_score",
+                "strategy", "market_brain", "decision"
+            ])
+
+
+def init_simulation_log():
+    if not os.path.exists(SIMULATION_LOG_FILE):
+        with open(SIMULATION_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "ticker", "strategy", "similar_count",
+                "sim_win_rate", "sim_avg_return", "sim_ev",
+                "decision", "reason"
+            ])
+
+
+def init_evolution_log():
+    if not os.path.exists(EVOLUTION_LOG_FILE):
+        with open(EVOLUTION_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "strategy", "count", "win_rate", "avg_return",
+                "old_weight", "new_weight", "action"
+            ])
+
+
+def load_strategy_weights():
+    defaults = {"Leader": 1.0, "Momentum": 1.0, "Scalp": 1.0, "Reversal": 1.0, "Breakout": 1.0, "Unknown": 0.8}
+    if not os.path.exists(STRATEGY_WEIGHT_FILE):
+        return defaults
+    try:
+        with open(STRATEGY_WEIGHT_FILE, "r") as f:
+            data = json.load(f)
+        defaults.update(data)
+        return defaults
+    except Exception:
+        return defaults
+
+
+def save_strategy_weights(weights):
+    try:
+        with open(STRATEGY_WEIGHT_FILE, "w") as f:
+            json.dump(weights, f, indent=2)
+    except Exception as e:
+        print("Strategy weight 저장 오류:", e)
+
+
+def evolve_strategy_weights():
+    if not EVOLUTION_ENGINE_ENABLED:
+        return load_strategy_weights()
+
+    weights = load_strategy_weights()
+    sells = read_recent_sells(EVOLUTION_LOOKBACK)
+
+    if not sells:
+        return weights
+
+    for strategy in ["Leader", "Momentum", "Scalp", "Reversal", "Breakout"]:
+        vals = []
+        for row in sells:
+            if detect_result_strategy(row) == strategy:
+                try:
+                    vals.append(float(row.get("profit_rate", 0)))
+                except Exception:
+                    pass
+
+        if len(vals) < EVOLUTION_MIN_TRADES:
+            continue
+
+        old = float(weights.get(strategy, 1.0))
+        win_rate = len([v for v in vals if v > 0]) / len(vals)
+        avg_return = sum(vals) / len(vals)
+
+        if avg_return > 0.004 and win_rate >= 0.55:
+            new = min(EVOLUTION_MAX_WEIGHT, old + EVOLUTION_WEIGHT_STEP)
+            action = "UP"
+        elif avg_return < -0.003 or win_rate <= 0.35:
+            new = max(EVOLUTION_MIN_WEIGHT, old - EVOLUTION_WEIGHT_STEP)
+            action = "DOWN"
+        else:
+            new = old
+            action = "KEEP"
+
+        weights[strategy] = new
+
+        try:
+            init_evolution_log()
+            with open(EVOLUTION_LOG_FILE, "a", newline="") as f:
+                csv.writer(f).writerow([now_text(), strategy, len(vals), round(win_rate, 3), round(avg_return, 5), round(old, 3), round(new, 3), action])
+        except Exception:
+            pass
+
+    save_strategy_weights(weights)
+    return weights
+
+
+def get_candidate_similarity_score(result, row):
+    score = 0
+    if result.get("ticker") == row.get("ticker"):
+        score += 2
+    strategy = result.get("ev_strategy") or result.get("tournament_winner") or ""
+    if strategy and strategy in row.get("strategy", ""):
+        score += 2
+    try:
+        if abs(float(row.get("ai_confidence", 0)) - float(result.get("ai_confidence", 0))) <= 12:
+            score += 1
+    except Exception:
+        pass
+    try:
+        if row.get("market_brain") and row.get("market_brain") == result.get("market_brain"):
+            score += 2
+    except Exception:
+        pass
+    return score
+
+
+def simulate_candidate_from_logs(result):
+    rows = []
+    if os.path.exists(MISSED_OPPORTUNITY_FILE):
+        try:
+            with open(MISSED_OPPORTUNITY_FILE, "r") as f:
+                rows.extend(list(csv.DictReader(f))[-SIMULATION_LOOKBACK_ROWS:])
+        except Exception:
+            pass
+
+    if not rows:
+        return {"similar_count": 0, "win_rate": 0.5, "avg_return": 0.0, "sim_ev": 0.0, "pass": True, "reason": "시뮬레이션 데이터 부족"}
+
+    vals = []
+    for row in rows:
+        if get_candidate_similarity_score(result, row) >= 3:
+            try:
+                vals.append(float(row.get("future_return", 0)))
+            except Exception:
+                pass
+
+    if len(vals) < SIMULATION_MIN_SIMILAR:
+        return {"similar_count": len(vals), "win_rate": 0.5, "avg_return": 0.0, "sim_ev": 0.0, "pass": True, "reason": "유사 샘플 부족"}
+
+    win_rate = len([x for x in vals if x > 0]) / len(vals)
+    avg_return = sum(vals) / len(vals)
+    passed = avg_return >= SIMULATION_PASS_EV or win_rate >= 0.58
+    return {"similar_count": len(vals), "win_rate": win_rate, "avg_return": avg_return, "sim_ev": avg_return, "pass": passed, "reason": "시뮬레이션 통과" if passed else "시뮬레이션 EV 부족"}
+
+
+def apply_simulation_engine(results):
+    if not SIMULATION_ENGINE_ENABLED:
+        return results
+    upgraded = []
+    for r in results:
+        sim = simulate_candidate_from_logs(r)
+        r["simulation_count"] = sim["similar_count"]
+        r["simulation_win_rate"] = sim["win_rate"]
+        r["simulation_ev"] = sim["sim_ev"]
+        r["simulation_pass"] = sim["pass"]
+        if sim["pass"]:
+            r["rank_score"] += max(0, sim["sim_ev"] * 1000)
+            if sim["similar_count"] >= SIMULATION_MIN_SIMILAR:
+                r["strategy"] += f" + SIM통과({sim['sim_ev']*100:.2f}%)"
+        else:
+            r["rank_score"] -= SIMULATION_FAIL_PENALTY
+            r["ai_risk"] = min(100, r.get("ai_risk", 0) + 8)
+            r["strategy"] += " + SIM불합격"
+        try:
+            init_simulation_log()
+            with open(SIMULATION_LOG_FILE, "a", newline="") as f:
+                csv.writer(f).writerow([now_text(), r.get("ticker", ""), r.get("ev_strategy", r.get("tournament_winner", "")), sim["similar_count"], round(sim["win_rate"], 3), round(sim["avg_return"], 5), round(sim["sim_ev"], 5), "PASS" if sim["pass"] else "FAIL", sim["reason"]])
+        except Exception:
+            pass
+        upgraded.append(r)
+    return sorted(upgraded, key=lambda x: (x.get("simulation_pass", True), x.get("expected_value", -1), x.get("rank_score", 0)), reverse=True)
+
+
+def apply_portfolio_ai(results):
+    if not PORTFOLIO_AI_ENABLED or not results:
+        return results
+    weights = evolve_strategy_weights()
+    candidates = []
+    for r in results:
+        ev = float(r.get("expected_value", 0) or 0)
+        conf = float(r.get("ai_confidence", 0) or 0)
+        pred = float(r.get("prediction_score", 0) or 0)
+        risk = float(r.get("ai_risk", 0) or 0)
+        strategy = r.get("ev_strategy") or r.get("tournament_winner") or "Unknown"
+        strategy_weight = float(weights.get(strategy, 0.8))
+        portfolio_score = (ev * 1000 * 1.8 + conf * 0.45 + pred * 0.35 - risk * 0.40) * strategy_weight
+        if not r.get("simulation_pass", True):
+            portfolio_score -= 20
+        r["portfolio_score"] = portfolio_score
+        r["strategy_weight"] = strategy_weight
+        if ev >= PORTFOLIO_MIN_EV and portfolio_score >= PORTFOLIO_MIN_SCORE:
+            r["portfolio_decision"] = "PORTFOLIO_PASS"
+            r["strategy"] += f" + PF통과({portfolio_score:.1f})"
+        else:
+            r["portfolio_decision"] = "PORTFOLIO_LOW"
+            r["strategy"] += f" + PF낮음({portfolio_score:.1f})"
+            r["rank_score"] -= 25
+        candidates.append(r)
+
+    candidates = sorted(candidates, key=lambda x: (x.get("portfolio_decision") == "PORTFOLIO_PASS", x.get("portfolio_score", -999), x.get("expected_value", -1)), reverse=True)
+    top = [c for c in candidates[:PORTFOLIO_TOP_N] if c.get("portfolio_decision") == "PORTFOLIO_PASS"]
+    total_score = sum([max(c.get("portfolio_score", 0), 1) for c in top]) or 1
+    try:
+        init_portfolio_ai_log()
+        with open(PORTFOLIO_AI_LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            for i, c in enumerate(candidates[:PORTFOLIO_TOP_N], start=1):
+                w = max(c.get("portfolio_score", 0), 1) / total_score if c in top else 0
+                c["suggested_weight"] = w
+                writer.writerow([now_text(), i, c.get("ticker", ""), round(w, 3), round(c.get("portfolio_score", 0), 2), round(c.get("expected_value", 0), 5), round(c.get("ai_confidence", 0), 2), round(c.get("prediction_score", 0), 2), c.get("ev_strategy", c.get("tournament_winner", "")), c.get("market_brain", ""), c.get("portfolio_decision", "")])
+    except Exception:
+        pass
+    return candidates
+
+
 def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
     learning = get_auto_learning_adjustments()
     advanced_learning = get_advanced_learning_adjustments()
@@ -4259,7 +4500,7 @@ def manage_holding(ticker, state):
 # MAIN LOOP
 # =========================
 def main():
-    print("Upbit v6 Strategy AI + Expected Value Engine 시작")
+    print("Upbit v6.3 Portfolio + Simulation + Evolution 시작")
 
     init_trade_log()
     analyze_trade_log()
