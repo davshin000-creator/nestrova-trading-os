@@ -105,8 +105,19 @@ COINGECKO_SCORE_MAX = 20
 
 STATE_FILE = "state.json"
 TRADE_LOG_FILE = "trade_log.csv"
+AI_RECORDER_FILE = "ai_recorder_log.csv"
+TRADE_DETAIL_FILE = "trade_detail_log.csv"
+CANDIDATE_SNAPSHOT_FILE = "candidate_snapshot_log.csv"
+STRATEGY_AI_LOG_FILE = "strategy_ai_log.csv"
+EXPECTED_VALUE_LOG_FILE = "expected_value_log.csv"
+STRATEGY_MEMORY_FILE = "strategy_memory.json"
+MARKET_BRAIN_FILE = "market_brain_log.csv"
 ENTRY_ZONE_LOG_FILE = "entry_zone_log.csv"
 PREDICTION_LOG_FILE = "candidate_prediction_log.csv"
+AUTO_TUNING_FILE = "auto_tuning_state.json"
+MARKET_DNA_FILE = "market_dna_log.csv"
+COIN_DNA_FILE = "coin_dna.json"
+BUY_LOCK_FILE = "buy.lock"
 ENTRY_QUALITY_FILE = "entry_quality.csv"
 FILTER_LOG_FILE = "filter_log.csv"
 AI_DECISION_LOG_FILE = "ai_decision_log.csv"
@@ -133,6 +144,30 @@ PREDICTION_MIN_SCORE_BUY = 72
 PREDICTION_STRONG_SCORE = 86
 EXPECTED_DRAWDOWN_BLOCK = -0.018
 EXPECTED_DRAWDOWN_WARN = -0.010
+
+# v5.1 Buy Frequency / Auto Tuning / DNA 2.0
+BUY_FREQUENCY_TARGET_DAILY = 2
+BUY_FREQUENCY_LOW_BUY_HOURS = 18
+BUY_FREQUENCY_HIGH_BUY_DAILY = 8
+AUTO_TUNE_ENTRY_RELAX_STEP = 0.0005
+AUTO_TUNE_ENTRY_TIGHT_STEP = 0.0007
+AUTO_TUNE_MAX_RELAX = 0.004
+AUTO_TUNE_MAX_TIGHT = 0.004
+PREDICTION_TUNE_STEP = 3
+PREDICTION_TUNE_MAX = 12
+MARKET_DNA_BONUS_MAX = 16
+COIN_DNA_BONUS_MAX = 18
+BUY_LOCK_MAX_AGE_MINUTES = 30
+
+# v6.0 Strategy AI / Expected Value Engine
+STRATEGY_AI_ENABLED = True
+EV_MIN_BUY = 0.003
+EV_STRONG_BUY = 0.010
+STRATEGY_ACTIVE_TOP_N = 2
+STRATEGY_MEMORY_LOOKBACK = 120
+STRATEGY_MEMORY_MIN_TRADES = 3
+STRATEGY_EV_BONUS_MAX = 18
+MARKET_BRAIN_RISK_OFF_PENALTY = 16
 
 # AI Engine 2.0
 SURVIVAL_MIN_CONFIDENCE = 68
@@ -302,12 +337,176 @@ def init_trade_log():
 def write_trade_log(event, ticker, market_regime="", strategy="", score="",
                     rank_score="", price="", profit_rate="", highest_price="", note=""):
     init_trade_log()
+    init_ai_recorder_log()
+    init_trade_detail_log()
+    init_candidate_snapshot_log()
     with open(TRADE_LOG_FILE, "a", newline="") as f:
         csv.writer(f).writerow([
             now_text(), event, ticker, market_regime, strategy,
             score, rank_score, price, profit_rate, highest_price, note
         ])
 
+
+
+
+
+def init_ai_recorder_log():
+    if not os.path.exists(AI_RECORDER_FILE):
+        with open(AI_RECORDER_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "event", "ticker", "decision", "price",
+                "ai_confidence", "ai_risk", "expected_profit",
+                "prediction_score", "tournament_winner", "tournament_score",
+                "market_regime", "market_mode", "market_dna",
+                "coin_dna_bonus", "market_dna_bonus",
+                "entry_zone_low", "entry_zone_high", "target_entry_price",
+                "expected_drawdown", "score", "rank_score", "strategy", "reason"
+            ])
+
+
+def init_trade_detail_log():
+    if not os.path.exists(TRADE_DETAIL_FILE):
+        with open(TRADE_DETAIL_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "event", "ticker", "price", "profit_rate",
+                "entry_price", "highest_price", "highest_profit_rate",
+                "mae", "mfe", "hold_minutes", "sell_reason",
+                "ai_confidence", "ai_risk", "prediction_score",
+                "tournament_winner", "tournament_score", "market_dna",
+                "entry_zone_low", "entry_zone_high", "strategy"
+            ])
+
+
+def init_candidate_snapshot_log():
+    if not os.path.exists(CANDIDATE_SNAPSHOT_FILE):
+        with open(CANDIDATE_SNAPSHOT_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "rank", "ticker", "price", "decision",
+                "ai_confidence", "ai_risk", "prediction_score",
+                "tournament_winner", "tournament_score",
+                "market_regime", "market_mode", "market_dna",
+                "entry_zone_low", "entry_zone_high",
+                "score", "rank_score", "strategy"
+            ])
+
+
+def safe_round(value, digits=4):
+    try:
+        if value == "" or value is None:
+            return ""
+        return round(float(value), digits)
+    except Exception:
+        return value
+
+
+def write_ai_recorder(event, result=None, decision="", reason="", price=None):
+    init_ai_recorder_log()
+    result = result or {}
+    if price is None:
+        price = result.get("price", "")
+
+    with open(AI_RECORDER_FILE, "a", newline="") as f:
+        csv.writer(f).writerow([
+            now_text(),
+            event,
+            result.get("ticker", ""),
+            decision,
+            safe_round(price, 6),
+            safe_round(result.get("ai_confidence", "")),
+            safe_round(result.get("ai_risk", "")),
+            safe_round(result.get("expected_profit", "")),
+            safe_round(result.get("prediction_score", "")),
+            result.get("tournament_winner", ""),
+            safe_round(result.get("tournament_score", "")),
+            result.get("market_regime", ""),
+            result.get("market_mode", ""),
+            result.get("market_dna", ""),
+            safe_round(result.get("coin_dna_bonus", "")),
+            safe_round(result.get("market_dna_bonus", "")),
+            safe_round(result.get("entry_zone_low", ""), 6),
+            safe_round(result.get("entry_zone_high", ""), 6),
+            safe_round(result.get("target_entry_price", ""), 6),
+            safe_round(result.get("expected_drawdown", "")),
+            result.get("score", ""),
+            safe_round(result.get("rank_score", "")),
+            result.get("strategy", ""),
+            f"{reason} | EV={safe_round(result.get('expected_value', ''))} | Brain={result.get('market_brain', '')}"
+        ])
+
+
+def write_candidate_snapshots(results, decision="SCAN_TOP"):
+    if not results:
+        return
+    init_candidate_snapshot_log()
+    with open(CANDIDATE_SNAPSHOT_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        for i, r in enumerate(results[:20], start=1):
+            writer.writerow([
+                now_text(),
+                i,
+                r.get("ticker", ""),
+                safe_round(r.get("price", ""), 6),
+                decision,
+                safe_round(r.get("ai_confidence", "")),
+                safe_round(r.get("ai_risk", "")),
+                safe_round(r.get("prediction_score", "")),
+                r.get("tournament_winner", ""),
+                safe_round(r.get("tournament_score", "")),
+                r.get("market_regime", ""),
+                r.get("market_mode", ""),
+                r.get("market_dna", ""),
+                safe_round(r.get("entry_zone_low", ""), 6),
+                safe_round(r.get("entry_zone_high", ""), 6),
+                r.get("score", ""),
+                safe_round(r.get("rank_score", "")),
+                r.get("strategy", "")
+            ])
+
+
+def write_trade_detail(event, ticker, state=None, price="", profit_rate="", sell_reason="", best=None):
+    init_trade_detail_log()
+    state = state or {}
+    best = best or {}
+
+    entry_price = state.get("entry_price", best.get("price", ""))
+    highest_price = state.get("highest_price", "")
+    highest_profit_rate = state.get("highest_profit_rate", "")
+
+    mae = state.get("mae", "")
+    mfe = state.get("mfe", "")
+
+    buy_time = state.get("buy_time", 0)
+    hold_minutes = ""
+    if buy_time:
+        try:
+            hold_minutes = (time.time() - float(buy_time)) / 60
+        except Exception:
+            hold_minutes = ""
+
+    with open(TRADE_DETAIL_FILE, "a", newline="") as f:
+        csv.writer(f).writerow([
+            now_text(),
+            event,
+            ticker,
+            safe_round(price, 6),
+            safe_round(profit_rate),
+            safe_round(entry_price, 6),
+            safe_round(highest_price, 6),
+            safe_round(highest_profit_rate),
+            safe_round(mae),
+            safe_round(mfe),
+            safe_round(hold_minutes, 2),
+            sell_reason,
+            safe_round(state.get("last_ai_confidence", best.get("ai_confidence", ""))),
+            safe_round(state.get("last_ai_risk", best.get("ai_risk", ""))),
+            safe_round(state.get("last_prediction_score", best.get("prediction_score", ""))),
+            state.get("last_tournament_winner", best.get("tournament_winner", "")),
+            safe_round(state.get("last_tournament_score", best.get("tournament_score", ""))),
+            state.get("market_dna", best.get("market_dna", "")),
+            safe_round(state.get("entry_zone_low", best.get("entry_zone_low", "")), 6),
+            safe_round(state.get("entry_zone_high", best.get("entry_zone_high", "")), 6),
+            state.get("entry_strategy", best.get("strategy", ""))
+        ])
 
 
 def init_filter_log():
@@ -2525,6 +2724,11 @@ def calculate_candidate_prediction(result):
         score += 3
         reasons.append("RSI적정")
 
+    prediction_adjust = float(get_auto_tuning_adjustments().get("prediction_adjust", 0))
+    if prediction_adjust:
+        score += prediction_adjust
+        reasons.append(f"예측자동보정 {prediction_adjust:.1f}")
+
     score = clamp(score, 0, 100)
 
     prob_2h = clamp(score / 100, 0.05, 0.95)
@@ -2586,7 +2790,15 @@ def calculate_dynamic_entry_zone(result):
         prediction_score = float(result.get("prediction_score", 0) or 0)
         leader = result.get("leader2_mode", False)
 
-        discount = clamp(atr_rate * ENTRY_ZONE_ATR_MULTIPLIER, ENTRY_ZONE_MIN_DISCOUNT, ENTRY_ZONE_MAX_DISCOUNT)
+        tuning = get_auto_tuning_adjustments()
+        relax = float(tuning.get("entry_relax", 0))
+        tight = float(tuning.get("entry_tight", 0))
+
+        discount = clamp(
+            atr_rate * ENTRY_ZONE_ATR_MULTIPLIER - relax + tight,
+            ENTRY_ZONE_MIN_DISCOUNT,
+            ENTRY_ZONE_MAX_DISCOUNT
+        )
 
         if leader or ai_conf >= 90 or tournament_score >= 85:
             discount *= 0.55
@@ -2661,6 +2873,654 @@ def apply_prediction_and_entry_zone(results):
         upgraded,
         key=lambda x: (
             x.get("prediction_score", 0),
+            x.get("ai_confidence", 0) - x.get("ai_risk", 0) * 0.35,
+            x.get("rank_score", 0)
+        ),
+        reverse=True
+    )
+
+
+
+def load_auto_tuning_state():
+    default = {
+        "entry_relax": 0.0,
+        "entry_tight": 0.0,
+        "prediction_adjust": 0.0,
+        "last_update": now_text()
+    }
+    if not os.path.exists(AUTO_TUNING_FILE):
+        return default
+    try:
+        with open(AUTO_TUNING_FILE, "r") as f:
+            data = json.load(f)
+        default.update(data)
+        return default
+    except Exception:
+        return default
+
+
+def save_auto_tuning_state(state):
+    try:
+        state["last_update"] = now_text()
+        with open(AUTO_TUNING_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print("auto tuning 저장 오류:", e)
+
+
+def get_today_buy_count():
+    if not os.path.exists(TRADE_LOG_FILE):
+        return 0
+    try:
+        today = time.strftime("%Y-%m-%d")
+        with open(TRADE_LOG_FILE, "r") as f:
+            rows = list(csv.DictReader(f))
+        return len([r for r in rows if r.get("event") == "BUY" and r.get("time", "").startswith(today)])
+    except Exception:
+        return 0
+
+
+def update_buy_frequency_tuning():
+    state = load_auto_tuning_state()
+    buys_today = get_today_buy_count()
+    hours_since = get_hours_since_last_buy() if "get_hours_since_last_buy" in globals() else 999
+
+    changed = False
+
+    # 너무 안 사면 진입존/예측 조건 완화
+    if hours_since >= BUY_FREQUENCY_LOW_BUY_HOURS and buys_today < BUY_FREQUENCY_TARGET_DAILY:
+        state["entry_relax"] = clamp(
+            float(state.get("entry_relax", 0)) + AUTO_TUNE_ENTRY_RELAX_STEP,
+            0,
+            AUTO_TUNE_MAX_RELAX
+        )
+        state["entry_tight"] = max(0, float(state.get("entry_tight", 0)) - AUTO_TUNE_ENTRY_TIGHT_STEP)
+        state["prediction_adjust"] = clamp(
+            float(state.get("prediction_adjust", 0)) - PREDICTION_TUNE_STEP,
+            -PREDICTION_TUNE_MAX,
+            PREDICTION_TUNE_MAX
+        )
+        changed = True
+        print(f"Buy Frequency 완화: 오늘 BUY {buys_today}, 마지막 매수 {hours_since:.1f}h")
+
+    # 너무 많이 사면 강화
+    if buys_today >= BUY_FREQUENCY_HIGH_BUY_DAILY:
+        state["entry_tight"] = clamp(
+            float(state.get("entry_tight", 0)) + AUTO_TUNE_ENTRY_TIGHT_STEP,
+            0,
+            AUTO_TUNE_MAX_TIGHT
+        )
+        state["entry_relax"] = max(0, float(state.get("entry_relax", 0)) - AUTO_TUNE_ENTRY_RELAX_STEP)
+        state["prediction_adjust"] = clamp(
+            float(state.get("prediction_adjust", 0)) + PREDICTION_TUNE_STEP,
+            -PREDICTION_TUNE_MAX,
+            PREDICTION_TUNE_MAX
+        )
+        changed = True
+        print(f"Buy Frequency 강화: 오늘 BUY {buys_today}")
+
+    if changed:
+        save_auto_tuning_state(state)
+
+    return state
+
+
+def get_auto_tuning_adjustments():
+    return load_auto_tuning_state()
+
+
+def init_market_dna_log():
+    if not os.path.exists(MARKET_DNA_FILE):
+        with open(MARKET_DNA_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "market_dna", "btc_change_4h", "strong_count",
+                "leader_count", "avg_volume_accel", "avg_relative_strength"
+            ])
+
+
+def classify_market_dna(results, market_regime, btc_change_4h):
+    if not results:
+        return "BEAR_EMPTY" if market_regime == "bear" else "QUIET_EMPTY", {}
+
+    sample = results[:20]
+    strong_count = len([
+        r for r in sample
+        if r.get("daily_change", 0) >= 0.04 and r.get("relative_strength", 0) >= 0.015
+    ])
+    leader_count = len([
+        r for r in sample
+        if r.get("leader2_mode") or r.get("daily_change", 0) >= 0.08
+    ])
+    breakout_count = len([
+        r for r in sample
+        if r.get("volume_accel", 0) >= 2.5 and r.get("change_15m", 0) > 0
+    ])
+
+    avg_vol = sum([r.get("volume_accel", 0) for r in sample]) / max(len(sample), 1)
+    avg_rs = sum([r.get("relative_strength", 0) for r in sample]) / max(len(sample), 1)
+
+    if market_regime == "bear" and strong_count <= 2:
+        dna = "PANIC_OR_BEAR"
+    elif btc_change_4h > 0.01 and strong_count >= 6:
+        dna = "STRONG_BULL"
+    elif btc_change_4h > 0.003 and strong_count >= 4:
+        dna = "WEAK_BULL"
+    elif leader_count >= 5 and avg_rs > 0.015:
+        dna = "ALT_ROTATION"
+    elif breakout_count >= 5 and avg_vol >= 2:
+        dna = "VOLUME_EXPLOSION"
+    elif strong_count >= 4 and btc_change_4h <= 0:
+        dna = "ALT_INDEPENDENT"
+    elif avg_vol < 1.2 and abs(btc_change_4h) < 0.004:
+        dna = "QUIET_SIDEWAYS"
+    elif market_regime == "sideways":
+        dna = "RANGE_ROTATION"
+    else:
+        dna = "MIXED_MARKET"
+
+    meta = {
+        "btc_change_4h": btc_change_4h,
+        "strong_count": strong_count,
+        "leader_count": leader_count,
+        "avg_volume_accel": avg_vol,
+        "avg_relative_strength": avg_rs,
+    }
+
+    try:
+        init_market_dna_log()
+        with open(MARKET_DNA_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(), dna, round(btc_change_4h, 5),
+                strong_count, leader_count, round(avg_vol, 3), round(avg_rs, 5)
+            ])
+    except Exception:
+        pass
+
+    return dna, meta
+
+
+def get_market_dna_bonus(result, market_dna):
+    bonus = 0
+    reasons = []
+
+    if market_dna in ["STRONG_BULL", "ALT_ROTATION", "VOLUME_EXPLOSION"]:
+        if result.get("leader2_mode") or result.get("volume_accel", 0) >= 2:
+            bonus += 10
+            reasons.append(f"MarketDNA {market_dna} +10")
+        elif result.get("relative_strength", 0) > 0:
+            bonus += 4
+            reasons.append(f"MarketDNA {market_dna} +4")
+
+    elif market_dna == "ALT_INDEPENDENT":
+        if result.get("relative_strength", 0) >= 0.03:
+            bonus += 12
+            reasons.append("독립알트장 +12")
+
+    elif market_dna == "QUIET_SIDEWAYS":
+        if result.get("change_15m", 0) > 0 and result.get("volume_accel", 0) >= 1.5:
+            bonus += 5
+            reasons.append("조용한횡보 강한후보 +5")
+        else:
+            bonus -= 4
+            reasons.append("조용한횡보 약후보 -4")
+
+    elif market_dna == "PANIC_OR_BEAR":
+        if result.get("leader2_mode") and result.get("relative_strength", 0) > 0.04:
+            bonus += 5
+            reasons.append("하락장 독립리더 +5")
+        else:
+            bonus -= 10
+            reasons.append("하락장 방어 -10")
+
+    return clamp(bonus, -MARKET_DNA_BONUS_MAX, MARKET_DNA_BONUS_MAX), reasons
+
+
+def load_coin_dna():
+    if not os.path.exists(COIN_DNA_FILE):
+        return {}
+    try:
+        with open(COIN_DNA_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_coin_dna(data):
+    try:
+        with open(COIN_DNA_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print("Coin DNA 저장 오류:", e)
+
+
+def update_coin_dna_from_result(result):
+    data = load_coin_dna()
+    ticker = result.get("ticker")
+    if not ticker:
+        return
+
+    item = data.get(ticker, {
+        "seen": 0,
+        "leader_seen": 0,
+        "breakout_seen": 0,
+        "pullback_seen": 0,
+        "avg_volume_accel": 0,
+        "avg_relative_strength": 0,
+        "avg_rsi": 0,
+        "dna_type": "UNKNOWN"
+    })
+
+    seen = int(item.get("seen", 0)) + 1
+    item["seen"] = seen
+
+    def avg_update(old, new):
+        return ((float(old) * (seen - 1)) + float(new)) / seen
+
+    item["avg_volume_accel"] = avg_update(item.get("avg_volume_accel", 0), result.get("volume_accel", 0))
+    item["avg_relative_strength"] = avg_update(item.get("avg_relative_strength", 0), result.get("relative_strength", 0))
+    item["avg_rsi"] = avg_update(item.get("avg_rsi", 0), result.get("rsi", 0))
+
+    if result.get("leader2_mode") or result.get("weekly_leader_mode"):
+        item["leader_seen"] = int(item.get("leader_seen", 0)) + 1
+
+    if result.get("volume_accel", 0) >= 2.5 and result.get("change_15m", 0) > 0:
+        item["breakout_seen"] = int(item.get("breakout_seen", 0)) + 1
+
+    if result.get("expected_drawdown", 0) <= -0.006:
+        item["pullback_seen"] = int(item.get("pullback_seen", 0)) + 1
+
+    leader_rate = item.get("leader_seen", 0) / max(seen, 1)
+    breakout_rate = item.get("breakout_seen", 0) / max(seen, 1)
+    pullback_rate = item.get("pullback_seen", 0) / max(seen, 1)
+    avg_rs = item.get("avg_relative_strength", 0)
+    avg_vol = item.get("avg_volume_accel", 0)
+
+    if leader_rate >= 0.30 and avg_rs > 0.02:
+        item["dna_type"] = "LEADER_COIN"
+    elif breakout_rate >= 0.30 and avg_vol >= 2:
+        item["dna_type"] = "BREAKOUT_COIN"
+    elif pullback_rate >= 0.30:
+        item["dna_type"] = "PULLBACK_COIN"
+    elif avg_rs < 0:
+        item["dna_type"] = "WEAK_COIN"
+    else:
+        item["dna_type"] = "MIXED_COIN"
+
+    item["last_seen"] = now_text()
+    data[ticker] = item
+    save_coin_dna(data)
+
+
+def get_coin_dna_bonus(result):
+    data = load_coin_dna()
+    ticker = result.get("ticker")
+    if not ticker or ticker not in data:
+        return 0, []
+
+    item = data[ticker]
+    dna = item.get("dna_type", "UNKNOWN")
+    bonus = 0
+    reasons = []
+
+    if dna == "LEADER_COIN":
+        if result.get("leader2_mode") or result.get("relative_strength", 0) >= 0.03:
+            bonus += 12
+            reasons.append("CoinDNA 리더형 +12")
+    elif dna == "BREAKOUT_COIN":
+        if result.get("volume_accel", 0) >= 2 and result.get("change_15m", 0) > 0:
+            bonus += 10
+            reasons.append("CoinDNA 돌파형 +10")
+    elif dna == "PULLBACK_COIN":
+        if result.get("expected_drawdown", 0) <= -0.004:
+            bonus += 6
+            reasons.append("CoinDNA 눌림형 +6")
+    elif dna == "WEAK_COIN":
+        bonus -= 8
+        reasons.append("CoinDNA 약세형 -8")
+
+    return clamp(bonus, -COIN_DNA_BONUS_MAX, COIN_DNA_BONUS_MAX), reasons
+
+
+def apply_dna_engines(results, market_dna):
+    upgraded = []
+
+    for r in results:
+        m_bonus, m_reasons = get_market_dna_bonus(r, market_dna)
+        c_bonus, c_reasons = get_coin_dna_bonus(r)
+
+        r["market_dna"] = market_dna
+        r["market_dna_bonus"] = m_bonus
+        r["coin_dna_bonus"] = c_bonus
+        r["rank_score"] += m_bonus + c_bonus
+        r["ai_confidence"] = clamp(r.get("ai_confidence", 0) + (m_bonus + c_bonus) * 0.4, 0, 100)
+
+        if m_bonus:
+            r["strategy"] += f" + MarketDNA({m_bonus:.1f})"
+        if c_bonus:
+            r["strategy"] += f" + CoinDNA({c_bonus:.1f})"
+
+        r.setdefault("ai_reasons", [])
+        r["ai_reasons"].extend(m_reasons + c_reasons)
+
+        update_coin_dna_from_result(r)
+        upgraded.append(r)
+
+    return sorted(
+        upgraded,
+        key=lambda x: (
+            x.get("prediction_score", 0),
+            x.get("ai_confidence", 0) - x.get("ai_risk", 0) * 0.35,
+            x.get("rank_score", 0)
+        ),
+        reverse=True
+    )
+
+
+def acquire_buy_lock():
+    now_ts = time.time()
+    if os.path.exists(BUY_LOCK_FILE):
+        try:
+            age_min = (now_ts - os.path.getmtime(BUY_LOCK_FILE)) / 60
+            if age_min < BUY_LOCK_MAX_AGE_MINUTES:
+                print("매수 락 존재 → 중복 매수 방지")
+                return False
+        except Exception:
+            pass
+
+    try:
+        with open(BUY_LOCK_FILE, "w") as f:
+            f.write(str(now_ts))
+        return True
+    except Exception:
+        return True
+
+
+def release_buy_lock():
+    try:
+        if os.path.exists(BUY_LOCK_FILE):
+            os.remove(BUY_LOCK_FILE)
+    except Exception:
+        pass
+
+
+
+def init_strategy_ai_log():
+    if not os.path.exists(STRATEGY_AI_LOG_FILE):
+        with open(STRATEGY_AI_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "market_brain", "active_strategies", "reason",
+                "btc_change_4h", "market_regime"
+            ])
+
+
+def init_expected_value_log():
+    if not os.path.exists(EXPECTED_VALUE_LOG_FILE):
+        with open(EXPECTED_VALUE_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "ticker", "strategy", "ev", "win_rate",
+                "avg_win", "avg_loss", "ai_confidence",
+                "prediction_score", "market_brain", "decision", "reason"
+            ])
+
+
+def init_market_brain_log():
+    if not os.path.exists(MARKET_BRAIN_FILE):
+        with open(MARKET_BRAIN_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "market_brain", "market_regime", "btc_change_4h",
+                "strong_count", "leader_count", "avg_rs", "avg_vol", "reason"
+            ])
+
+
+def load_strategy_memory():
+    if not os.path.exists(STRATEGY_MEMORY_FILE):
+        return {}
+    try:
+        with open(STRATEGY_MEMORY_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_strategy_memory(data):
+    try:
+        with open(STRATEGY_MEMORY_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print("Strategy memory 저장 오류:", e)
+
+
+def classify_market_brain(results, market_regime, btc_change_4h):
+    sample = results[:20] if results else []
+    strong_count = len([r for r in sample if r.get("relative_strength", 0) > 0.02 and r.get("daily_change", 0) > 0.03])
+    leader_count = len([r for r in sample if r.get("leader2_mode") or r.get("weekly_leader_mode")])
+    avg_rs = sum([r.get("relative_strength", 0) for r in sample]) / max(len(sample), 1)
+    avg_vol = sum([r.get("volume_accel", 0) for r in sample]) / max(len(sample), 1)
+
+    reason = []
+
+    if market_regime == "bear" and btc_change_4h < -0.015:
+        brain = "RISK_OFF_DAY"
+        reason.append("BTC 급락/하락장")
+    elif btc_change_4h > 0.01 and strong_count >= 5:
+        brain = "MOMENTUM_DAY"
+        reason.append("BTC 상승 + 강한 후보 다수")
+    elif leader_count >= 4 and avg_rs > 0.015:
+        brain = "LEADER_ROTATION_DAY"
+        reason.append("주도주 순환")
+    elif avg_vol >= 2.0 and strong_count >= 3:
+        brain = "BREAKOUT_DAY"
+        reason.append("거래량 폭발 후보")
+    elif abs(btc_change_4h) < 0.005 and strong_count >= 3:
+        brain = "SCALP_ROTATION_DAY"
+        reason.append("횡보장 알트 순환")
+    elif market_regime == "bear" and strong_count >= 2:
+        brain = "REVERSAL_DAY"
+        reason.append("하락장 반등 후보")
+    else:
+        brain = "SELECTIVE_DAY"
+        reason.append("선별장")
+
+    try:
+        init_market_brain_log()
+        with open(MARKET_BRAIN_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(), brain, market_regime, round(btc_change_4h, 5),
+                strong_count, leader_count, round(avg_rs, 5), round(avg_vol, 3),
+                " | ".join(reason)
+            ])
+    except Exception:
+        pass
+
+    return brain, reason
+
+
+def get_active_strategies(market_brain):
+    mapping = {
+        "RISK_OFF_DAY": ["Reversal", "Scalp"],
+        "MOMENTUM_DAY": ["Momentum", "Leader"],
+        "LEADER_ROTATION_DAY": ["Leader", "Breakout"],
+        "BREAKOUT_DAY": ["Breakout", "Momentum"],
+        "SCALP_ROTATION_DAY": ["Scalp", "Leader"],
+        "REVERSAL_DAY": ["Reversal", "Leader"],
+        "SELECTIVE_DAY": ["Leader", "Scalp"]
+    }
+    return mapping.get(market_brain, ["Leader", "Scalp"])[:STRATEGY_ACTIVE_TOP_N]
+
+
+def detect_result_strategy(row):
+    s = row.get("strategy", "")
+    for name in ["Leader", "Momentum", "Scalp", "Reversal", "Breakout"]:
+        if name in s:
+            return name
+    if "주도" in s or "Leader" in s:
+        return "Leader"
+    if "눌림" in s or "Scalp" in s:
+        return "Scalp"
+    if "돌파" in s or "Breakout" in s:
+        return "Breakout"
+    return "Unknown"
+
+
+def calculate_strategy_stats(strategy_name):
+    sells = read_recent_sells(STRATEGY_MEMORY_LOOKBACK)
+    vals = []
+
+    for row in sells:
+        detected = detect_result_strategy(row)
+        if detected == strategy_name:
+            try:
+                vals.append(float(row.get("profit_rate", 0)))
+            except Exception:
+                pass
+
+    if len(vals) < STRATEGY_MEMORY_MIN_TRADES:
+        # 데이터 없으면 보수적 기본값
+        return {
+            "count": len(vals),
+            "win_rate": 0.50,
+            "avg_win": 0.008,
+            "avg_loss": -0.006,
+            "ev": 0.001
+        }
+
+    wins = [v for v in vals if v > 0]
+    losses = [v for v in vals if v <= 0]
+
+    win_rate = len(wins) / len(vals)
+    avg_win = sum(wins) / len(wins) if wins else 0.004
+    avg_loss = sum(losses) / len(losses) if losses else -0.004
+    ev = win_rate * avg_win + (1 - win_rate) * avg_loss
+
+    return {
+        "count": len(vals),
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "ev": ev
+    }
+
+
+def calculate_expected_value(result, active_strategies, market_brain):
+    # 후보의 토너먼트 winner를 우선하되, 오늘 활성 전략이 아니면 큰 감점
+    strategy = result.get("tournament_winner") or "Leader"
+
+    if strategy not in active_strategies:
+        # 후보가 활성 전략과 맞지 않아도 완전 배제하지 않고 EV 감점
+        strategy_penalty = -0.006
+        active_match = False
+    else:
+        strategy_penalty = 0
+        active_match = True
+
+    stats = calculate_strategy_stats(strategy)
+
+    base_ev = stats["ev"]
+
+    # 후보별 보정
+    confidence = float(result.get("ai_confidence", 0) or 0)
+    prediction = float(result.get("prediction_score", 0) or 0)
+    risk = float(result.get("ai_risk", 0) or 0)
+
+    ev = base_ev
+    ev += (confidence - 75) * 0.00018
+    ev += (prediction - 70) * 0.00020
+    ev -= max(risk - 55, 0) * 0.00018
+    ev += float(result.get("expected_return_2h", 0) or 0) * 0.25
+    ev += strategy_penalty
+
+    if market_brain == "RISK_OFF_DAY" and not result.get("leader2_mode"):
+        ev -= 0.006
+
+    if result.get("expected_drawdown", 0) <= -0.018 and not result.get("leader2_mode"):
+        ev -= 0.004
+
+    result["expected_value"] = ev
+    result["ev_strategy"] = strategy
+    result["ev_win_rate"] = stats["win_rate"]
+    result["ev_avg_win"] = stats["avg_win"]
+    result["ev_avg_loss"] = stats["avg_loss"]
+    result["strategy_active_match"] = active_match
+
+    return result
+
+
+def apply_strategy_ai_engine(results, market_regime, btc_change_4h):
+    if not STRATEGY_AI_ENABLED:
+        return results
+
+    market_brain, brain_reason = classify_market_brain(results, market_regime, btc_change_4h)
+    active = get_active_strategies(market_brain)
+
+    try:
+        init_strategy_ai_log()
+        with open(STRATEGY_AI_LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(), market_brain, " | ".join(active),
+                " | ".join(brain_reason), round(btc_change_4h, 5), market_regime
+            ])
+    except Exception:
+        pass
+
+    upgraded = []
+
+    for r in results:
+        r["market_brain"] = market_brain
+        r["active_strategies"] = " | ".join(active)
+
+        r = calculate_expected_value(r, active, market_brain)
+
+        ev = r.get("expected_value", 0)
+        decision = "EV_WATCH"
+        reason = ""
+
+        if ev >= EV_STRONG_BUY:
+            r["rank_score"] += 40
+            r["ai_confidence"] = min(100, r.get("ai_confidence", 0) + 10)
+            r["strategy"] += f" + EV강함({ev*100:.2f}%)"
+            decision = "EV_STRONG"
+        elif ev >= EV_MIN_BUY:
+            r["rank_score"] += 20
+            r["ai_confidence"] = min(100, r.get("ai_confidence", 0) + 5)
+            r["strategy"] += f" + EV양호({ev*100:.2f}%)"
+            decision = "EV_OK"
+        else:
+            r["rank_score"] -= 35
+            r["ai_risk"] = min(100, r.get("ai_risk", 0) + 10)
+            r["strategy"] += f" + EV부족({ev*100:.2f}%)"
+            decision = "EV_LOW"
+
+        if not r.get("strategy_active_match"):
+            reason = "오늘 활성 전략과 불일치"
+        else:
+            reason = "오늘 활성 전략과 일치"
+
+        try:
+            init_expected_value_log()
+            with open(EXPECTED_VALUE_LOG_FILE, "a", newline="") as f:
+                csv.writer(f).writerow([
+                    now_text(),
+                    r.get("ticker", ""),
+                    r.get("ev_strategy", ""),
+                    round(ev, 5),
+                    round(r.get("ev_win_rate", 0), 3),
+                    round(r.get("ev_avg_win", 0), 5),
+                    round(r.get("ev_avg_loss", 0), 5),
+                    round(r.get("ai_confidence", 0), 2),
+                    round(r.get("prediction_score", 0), 2),
+                    market_brain,
+                    decision,
+                    reason
+                ])
+        except Exception:
+            pass
+
+        upgraded.append(r)
+
+    return sorted(
+        upgraded,
+        key=lambda x: (
+            x.get("expected_value", -1),
             x.get("ai_confidence", 0) - x.get("ai_risk", 0) * 0.35,
             x.get("rank_score", 0)
         ),
@@ -2773,6 +3633,9 @@ def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
 
     # AI Decision Engine: 조건 탈락보다 종합 점수로 재평가
     results = apply_ai_decision_engine(results, market_mode)
+    market_dna, market_dna_meta = classify_market_dna(results, market_regime, btc_change_4h)
+    print(f"Market DNA: {market_dna}")
+    results = apply_dna_engines(results, market_dna)
     write_rank_history(results)
     update_candidate_memory(results)
 
@@ -2985,6 +3848,7 @@ def check_watch_signal(state, performance):
         )
 
         if elapsed_min >= WATCH_TIMEOUT_MINUTES:
+            write_ai_recorder("WATCH_CANCEL", item, decision="CANCEL", reason="관찰 시간 초과", price=current_price)
             write_trade_log(
                 "WATCH_CANCEL",
                 watch_ticker,
@@ -3078,6 +3942,7 @@ def check_watch_signal(state, performance):
             or leader_flexible
         ):
             print(f"{watch_ticker} 매수 후보 확정")
+            write_ai_recorder("BUY_CANDIDATE_CONFIRMED", result, decision="READY_TO_BUY", reason="TOP5 관찰 통과", price=current_price)
             result["price"] = current_price
             result["strategy"] += " + TOP5관찰진입"
             state["watch_list"] = kept_items
@@ -3127,6 +3992,7 @@ def start_watch(best, state, top_results=None):
     save_state(state)
 
     for item in watch_items:
+        write_ai_recorder("WATCH_START", item, decision="WATCH", reason=f"TOP5 관찰 시작 | 주도주유연 {is_flexible_leader_watch(item)}")
         write_trade_log(
             "WATCH_START",
             item["ticker"],
@@ -3150,19 +4016,27 @@ def start_watch(best, state, top_results=None):
     )
 
 def buy_coin(best, krw_balance):
+    if not acquire_buy_lock():
+        return False
     if krw_balance < BUY_KRW:
         print("KRW 잔고 부족")
+        release_buy_lock()
         return False
 
     ticker = best["ticker"]
 
+    write_ai_recorder("BUY_ATTEMPT", best, decision="BUY", reason="시장가 매수 시도")
     print(f"{ticker} 매수 실행")
     result = upbit.buy_market_order(ticker, BUY_KRW)
     print(result)
 
     if isinstance(result, dict) and result.get("error"):
         print("매수 실패:", result)
+        release_buy_lock()
         return False
+
+    write_ai_recorder("BUY_SUCCESS", best, decision="BOUGHT", reason="시장가 매수 성공")
+    write_trade_detail("BUY", ticker, price=best.get("price", ""), best=best)
 
     write_trade_log(
         "BUY",
@@ -3188,6 +4062,7 @@ def buy_coin(best, krw_balance):
         f"거래량가속: {best['volume_accel']:.2f}"
     )
 
+    release_buy_lock()
     return True
 
 
@@ -3231,6 +4106,9 @@ def manage_holding(ticker, state):
 
     profit_rate = (price - avg_buy_price) / avg_buy_price
     position_value = balance * price
+
+    state["mae"] = min(float(state.get("mae", 0) or 0), profit_rate)
+    state["mfe"] = max(float(state.get("mfe", 0) or 0), profit_rate)
 
     if state.get("highest_price", 0) == 0:
         state["highest_price"] = price
@@ -3342,6 +4220,9 @@ def manage_holding(ticker, state):
         completed = confirm_sell_completed(ticker, currency)
 
         if completed:
+            write_ai_recorder("SELL_SUCCESS", {"ticker": ticker, "price": price, "strategy": state.get("entry_strategy", ""), "ai_confidence": state.get("last_ai_confidence", ""), "ai_risk": state.get("last_ai_risk", ""), "prediction_score": state.get("last_prediction_score", ""), "tournament_winner": state.get("last_tournament_winner", ""), "tournament_score": state.get("last_tournament_score", ""), "market_dna": state.get("market_dna", "")}, decision="SOLD", reason=sell_reason, price=price)
+            write_trade_detail("SELL", ticker, state=state, price=price, profit_rate=profit_rate, sell_reason=sell_reason)
+
             write_trade_log(
                 "SELL",
                 ticker,
@@ -3378,7 +4259,7 @@ def manage_holding(ticker, state):
 # MAIN LOOP
 # =========================
 def main():
-    print("Upbit AI Decision Engine 2.0 + 후보생존 봇 시작")
+    print("Upbit v6 Strategy AI + Expected Value Engine 시작")
 
     init_trade_log()
     analyze_trade_log()
@@ -3409,6 +4290,7 @@ def main():
 
         if not top_results:
             print("매수할 코인 없음")
+            write_ai_recorder("NO_CANDIDATE", {}, decision="NO_BUY", reason="통과 후보 없음")
             return
 
         best = top_results[0]
@@ -3444,6 +4326,16 @@ def main():
         state["last_ai_risk"] = best.get("ai_risk", 0)
         state["last_ai_expected_profit"] = best.get("expected_profit", 0)
         state["market_mode"] = best.get("market_mode", "")
+        state["last_prediction_score"] = best.get("prediction_score", 0)
+        state["last_tournament_winner"] = best.get("tournament_winner", "")
+        state["last_tournament_score"] = best.get("tournament_score", 0)
+        state["market_dna"] = best.get("market_dna", "")
+        state["entry_zone_low"] = best.get("entry_zone_low", 0)
+        state["entry_zone_high"] = best.get("entry_zone_high", 0)
+        state["target_entry_price"] = best.get("target_entry_price", 0)
+        state["expected_drawdown"] = best.get("expected_drawdown", 0)
+        state["mae"] = 0
+        state["mfe"] = 0
 
         save_state(state)
 
