@@ -45,3 +45,21 @@ def save_json(data, path):
     path = Path(path)
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def build_action_plan(trade_summary, ev_summary):
+    plan = {
+        "mode_recommendation": "OBSERVE",
+        "disabled_strategies": [],
+        "reduced_strategies": [],
+        "preferred_strategies": [],
+        "blocked_tickers": [],
+        "notes": []
+    }
+    return plan
+
+def save_action_plan(plan, path="reports/action_plan.json"):
+    import json
+    from pathlib import Path
+    path = Path(path)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")

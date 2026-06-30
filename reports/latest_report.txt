@@ -1,0 +1,29 @@
+===== Nestrova Intelligence Report v2 =====
+Generated: 2026-06-30 16:07:51
+
+## Realized trades
+BUY count: 0
+SELL count: 0
+Win rate: 0.00%
+Total profit: 0.00%
+Average profit: 0.00%
+Average win: 0.00%
+Average loss: 0.00%
+Best trade: 0.00%
+Worst trade: 0.00%
+
+## Worst tickers
+
+## Worst strategies
+
+## Expected value
+EV rows: 0
+Average EV: 0.00%
+Low EV candidates: 0
+
+## Action Plan
+Mode: OBSERVE
+Disable: None
+Reduce: None
+Prefer: None
+Blocked tickers: None
