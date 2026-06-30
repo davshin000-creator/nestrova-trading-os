@@ -118,6 +118,12 @@ EVOLUTION_LOG_FILE = "evolution_log.csv"
 STRATEGY_WEIGHT_FILE = "strategy_weights.json"
 STRATEGY_OVERRIDE_FILE = "config/strategy_override.json"
 SELF_OPTIMIZER_LOG_FILE = "self_optimizer_log.csv"
+SHADOW_TRADING_LOG_FILE = "shadow_trading_log.csv"
+SHADOW_RESULT_LOG_FILE = "shadow_result_log.csv"
+META_AI_LOG_FILE = "meta_ai_log.csv"
+EXIT_INTELLIGENCE_LOG_FILE = "exit_intelligence_log.csv"
+CONFIDENCE_BUDGET_LOG_FILE = "confidence_budget_log.csv"
+SHADOW_STATE_FILE = "shadow_positions.json"
 ENTRY_ZONE_LOG_FILE = "entry_zone_log.csv"
 PREDICTION_LOG_FILE = "candidate_prediction_log.csv"
 AUTO_TUNING_FILE = "auto_tuning_state.json"
@@ -167,6 +173,35 @@ BUY_LOCK_MAX_AGE_MINUTES = 30
 
 # v6.0 Strategy AI / Expected Value Engine
 STRATEGY_AI_ENABLED = True
+
+# v6.5 Shadow Trading
+SHADOW_TRADING_ENABLED = True
+
+# v7.0 Meta No-Trade / Exit Intelligence / Confidence Budget
+META_NO_TRADE_ENABLED = True
+META_MIN_BEST_EV = 0.003
+META_MIN_BEST_CONFIDENCE = 78
+META_MAX_AVG_RISK = 72
+META_RISK_OFF_EV_REQUIRED = 0.012
+META_LOW_QUALITY_TOP_N = 5
+
+EXIT_INTELLIGENCE_ENABLED = True
+EXIT_RECOVERY_SCORE_HOLD = 68
+EXIT_RECOVERY_SCORE_SELL = 42
+EXIT_RECOVERY_HOLD_MINUTES = 15
+EXIT_SMALL_LOSS_ZONE = -0.012
+EXIT_DEEP_LOSS_FORCE = -0.026
+
+CONFIDENCE_BUDGET_ENABLED = True
+BUDGET_MIN_KRW = 5000
+BUDGET_BASE_KRW = BUY_KRW
+BUDGET_MAX_MULTIPLIER = 1.0
+BUDGET_MEDIUM_MULTIPLIER = 0.7
+BUDGET_LOW_MULTIPLIER = 0.45
+SHADOW_TOP_N = 10
+SHADOW_TP = 0.018
+SHADOW_SL = -0.012
+SHADOW_MAX_HOLD_HOURS = 6
 EV_MIN_BUY = 0.003
 EV_STRONG_BUY = 0.010
 STRATEGY_ACTIVE_TOP_N = 2
@@ -361,6 +396,9 @@ def init_trade_log():
 def write_trade_log(event, ticker, market_regime="", strategy="", score="",
                     rank_score="", price="", profit_rate="", highest_price="", note=""):
     init_trade_log()
+    init_meta_ai_log()
+    init_exit_intelligence_log()
+    init_confidence_budget_log()
     init_self_optimizer_log()
     init_ai_recorder_log()
     init_trade_detail_log()
@@ -3902,6 +3940,455 @@ def apply_strategy_override(results):
     )
 
 
+
+def init_shadow_trading_log():
+    if not os.path.exists(SHADOW_TRADING_LOG_FILE):
+        with open(SHADOW_TRADING_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "shadow_id", "ticker", "entry_price", "rank",
+                "strategy", "ai_confidence", "ai_risk", "prediction_score",
+                "expected_value", "portfolio_score", "market_brain",
+                "entry_zone_low", "entry_zone_high", "status"
+            ])
+
+
+def init_shadow_result_log():
+    if not os.path.exists(SHADOW_RESULT_LOG_FILE):
+        with open(SHADOW_RESULT_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "shadow_id", "ticker", "entry_price", "exit_price",
+                "profit_rate", "hold_hours", "exit_reason", "rank", "strategy",
+                "ai_confidence", "prediction_score", "expected_value",
+                "portfolio_score", "market_brain"
+            ])
+
+
+def load_shadow_positions():
+    if not os.path.exists(SHADOW_STATE_FILE):
+        return []
+    try:
+        with open(SHADOW_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_shadow_positions(positions):
+    try:
+        with open(SHADOW_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(positions, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print("shadow position 저장 오류:", e)
+
+
+def make_shadow_id(ticker):
+    return f"{ticker}-{int(time.time())}"
+
+
+def add_shadow_trades(results, live_ticker=""):
+    if not SHADOW_TRADING_ENABLED or not results:
+        return
+
+    init_shadow_trading_log()
+    positions = load_shadow_positions()
+    active_keys = set([p.get("ticker") for p in positions if p.get("status") == "OPEN"])
+    now_ts = time.time()
+    added = 0
+
+    for i, r in enumerate(results[:SHADOW_TOP_N], start=1):
+        ticker = r.get("ticker", "")
+        price = r.get("price", 0)
+        if not ticker or not price or ticker == live_ticker or ticker in active_keys:
+            continue
+
+        shadow = {
+            "shadow_id": make_shadow_id(ticker),
+            "ticker": ticker,
+            "entry_price": float(price),
+            "entry_time": now_ts,
+            "rank": i,
+            "strategy": r.get("strategy", ""),
+            "ai_confidence": r.get("ai_confidence", 0),
+            "ai_risk": r.get("ai_risk", 0),
+            "prediction_score": r.get("prediction_score", 0),
+            "expected_value": r.get("expected_value", 0),
+            "portfolio_score": r.get("portfolio_score", 0),
+            "market_brain": r.get("market_brain", ""),
+            "entry_zone_low": r.get("entry_zone_low", 0),
+            "entry_zone_high": r.get("entry_zone_high", 0),
+            "status": "OPEN"
+        }
+        positions.append(shadow)
+        active_keys.add(ticker)
+        added += 1
+
+        with open(SHADOW_TRADING_LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(), shadow["shadow_id"], ticker, shadow["entry_price"], i,
+                shadow["strategy"], shadow["ai_confidence"], shadow["ai_risk"],
+                shadow["prediction_score"], shadow["expected_value"],
+                shadow["portfolio_score"], shadow["market_brain"],
+                shadow["entry_zone_low"], shadow["entry_zone_high"], "OPEN"
+            ])
+
+    if added:
+        print(f"Shadow Trading 후보 {added}개 기록")
+    save_shadow_positions(positions)
+
+
+def evaluate_shadow_trades():
+    if not SHADOW_TRADING_ENABLED:
+        return
+    positions = load_shadow_positions()
+    if not positions:
+        return
+
+    init_shadow_result_log()
+    now_ts = time.time()
+    updated = []
+    closed = 0
+
+    for p in positions:
+        if p.get("status") != "OPEN":
+            updated.append(p)
+            continue
+
+        ticker = p.get("ticker")
+        entry_price = float(p.get("entry_price", 0) or 0)
+        entry_time = float(p.get("entry_time", 0) or 0)
+        if not ticker or entry_price <= 0:
+            p["status"] = "INVALID"
+            updated.append(p)
+            continue
+
+        price = pyupbit.get_current_price(ticker)
+        if not price:
+            updated.append(p)
+            continue
+
+        hold_hours = (now_ts - entry_time) / 3600 if entry_time else 0
+        profit_rate = (float(price) - entry_price) / entry_price
+        exit_reason = ""
+        if profit_rate >= SHADOW_TP:
+            exit_reason = "SHADOW_TP"
+        elif profit_rate <= SHADOW_SL:
+            exit_reason = "SHADOW_SL"
+        elif hold_hours >= SHADOW_MAX_HOLD_HOURS:
+            exit_reason = "SHADOW_TIME_EXIT"
+
+        if exit_reason:
+            p["status"] = "CLOSED"
+            p["exit_price"] = float(price)
+            p["profit_rate"] = profit_rate
+            p["exit_reason"] = exit_reason
+            p["hold_hours"] = hold_hours
+            closed += 1
+            with open(SHADOW_RESULT_LOG_FILE, "a", newline="") as f:
+                csv.writer(f).writerow([
+                    now_text(), p.get("shadow_id", ""), ticker, entry_price,
+                    float(price), round(profit_rate, 5), round(hold_hours, 2),
+                    exit_reason, p.get("rank", ""), p.get("strategy", ""),
+                    p.get("ai_confidence", ""), p.get("prediction_score", ""),
+                    p.get("expected_value", ""), p.get("portfolio_score", ""),
+                    p.get("market_brain", "")
+                ])
+        updated.append(p)
+
+    if closed:
+        print(f"Shadow Trading {closed}개 평가 완료")
+
+    recent = []
+    for p in updated:
+        if p.get("status") == "OPEN":
+            recent.append(p)
+        else:
+            try:
+                if now_ts - float(p.get("entry_time", 0)) < 86400 * 3:
+                    recent.append(p)
+            except Exception:
+                pass
+    save_shadow_positions(recent)
+
+
+def summarize_shadow_performance(limit=200):
+    if not os.path.exists(SHADOW_RESULT_LOG_FILE):
+        return None
+    try:
+        with open(SHADOW_RESULT_LOG_FILE, "r") as f:
+            rows = list(csv.DictReader(f))[-limit:]
+    except Exception:
+        return None
+    vals = []
+    for r in rows:
+        try:
+            vals.append(float(r.get("profit_rate", 0)))
+        except Exception:
+            pass
+    if not vals:
+        return None
+    return {
+        "count": len(vals),
+        "win_rate": len([v for v in vals if v > 0]) / len(vals) * 100,
+        "avg": sum(vals) / len(vals) * 100,
+        "best": max(vals) * 100,
+        "worst": min(vals) * 100,
+    }
+
+
+def init_meta_ai_log():
+    if not os.path.exists(META_AI_LOG_FILE):
+        with open(META_AI_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "decision", "reason", "best_ticker", "best_ev",
+                "best_confidence", "avg_risk", "market_brain", "top_count"
+            ])
+
+
+def init_exit_intelligence_log():
+    if not os.path.exists(EXIT_INTELLIGENCE_LOG_FILE):
+        with open(EXIT_INTELLIGENCE_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "ticker", "profit_rate", "recovery_score",
+                "decision", "reason", "strength_score", "btc_change_15m",
+                "volume_ok", "rs_ok", "hold_minutes"
+            ])
+
+
+def init_confidence_budget_log():
+    if not os.path.exists(CONFIDENCE_BUDGET_LOG_FILE):
+        with open(CONFIDENCE_BUDGET_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "ticker", "budget_krw", "multiplier",
+                "ai_confidence", "prediction_score", "expected_value",
+                "portfolio_score", "reason"
+            ])
+
+
+def get_btc_change_minutes(minutes=15):
+    try:
+        count = max(4, int(minutes / 5) + 2)
+        df = pyupbit.get_ohlcv("KRW-BTC", interval="minute5", count=count)
+        if df is None or len(df) < 2:
+            return 0
+        first = float(df["close"].iloc[0])
+        last = float(df["close"].iloc[-1])
+        if first <= 0:
+            return 0
+        return (last - first) / first
+    except Exception:
+        return 0
+
+
+def meta_no_trade_decision(results):
+    """
+    Meta AI decides whether today/this cycle is worth trading at all.
+    It does not sell holdings. It only blocks new entries.
+    """
+    if not META_NO_TRADE_ENABLED:
+        return False, "Meta disabled"
+
+    if not results:
+        return True, "No candidates"
+
+    top = results[:META_LOW_QUALITY_TOP_N]
+    best = top[0]
+
+    best_ev = float(best.get("expected_value", 0) or 0)
+    best_conf = float(best.get("ai_confidence", 0) or 0)
+    avg_risk = sum([float(r.get("ai_risk", 0) or 0) for r in top]) / max(len(top), 1)
+    market_brain = best.get("market_brain", "")
+    best_ticker = best.get("ticker", "")
+
+    decision = "TRADE_ALLOWED"
+    reason = "Quality acceptable"
+    block = False
+
+    if market_brain == "RISK_OFF_DAY" and best_ev < META_RISK_OFF_EV_REQUIRED:
+        block = True
+        decision = "NO_TRADE"
+        reason = "Risk-off day and EV not high enough"
+    elif best_ev < META_MIN_BEST_EV and best_conf < META_MIN_BEST_CONFIDENCE:
+        block = True
+        decision = "NO_TRADE"
+        reason = "Best candidate EV/confidence too low"
+    elif avg_risk >= META_MAX_AVG_RISK:
+        block = True
+        decision = "NO_TRADE"
+        reason = "Top candidates average risk too high"
+    elif best.get("portfolio_decision") == "PORTFOLIO_LOW" and best_ev < META_MIN_BEST_EV:
+        block = True
+        decision = "NO_TRADE"
+        reason = "Portfolio AI rejected best candidate"
+
+    try:
+        init_meta_ai_log()
+        with open(META_AI_LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(), decision, reason, best_ticker,
+                round(best_ev, 5), round(best_conf, 2), round(avg_risk, 2),
+                market_brain, len(results)
+            ])
+    except Exception:
+        pass
+
+    if block:
+        print(f"Meta AI: 신규 매수 중단 | {reason}")
+    else:
+        print(f"Meta AI: 거래 허용 | {reason}")
+
+    return block, reason
+
+
+def calculate_confidence_budget(best, krw_balance):
+    if not CONFIDENCE_BUDGET_ENABLED:
+        return min(BUY_KRW, krw_balance)
+
+    confidence = float(best.get("ai_confidence", 0) or 0)
+    prediction = float(best.get("prediction_score", 0) or 0)
+    ev = float(best.get("expected_value", 0) or 0)
+    pf = float(best.get("portfolio_score", 0) or 0)
+
+    reason = []
+    multiplier = BUDGET_LOW_MULTIPLIER
+
+    if confidence >= 92 and prediction >= 82 and ev >= 0.010:
+        multiplier = BUDGET_MAX_MULTIPLIER
+        reason.append("high confidence/high EV")
+    elif confidence >= 84 and prediction >= 72 and ev >= 0.005:
+        multiplier = BUDGET_MEDIUM_MULTIPLIER
+        reason.append("medium confidence")
+    else:
+        multiplier = BUDGET_LOW_MULTIPLIER
+        reason.append("low confidence budget")
+
+    if best.get("market_brain") == "RISK_OFF_DAY":
+        multiplier = min(multiplier, BUDGET_LOW_MULTIPLIER)
+        reason.append("risk-off cap")
+
+    if best.get("portfolio_decision") == "PORTFOLIO_LOW":
+        multiplier = min(multiplier, BUDGET_LOW_MULTIPLIER)
+        reason.append("portfolio low cap")
+
+    budget = BUDGET_BASE_KRW * multiplier
+    budget = max(BUDGET_MIN_KRW, budget)
+    budget = min(budget, krw_balance)
+
+    try:
+        init_confidence_budget_log()
+        with open(CONFIDENCE_BUDGET_LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(), best.get("ticker", ""), round(budget, 0),
+                round(multiplier, 2), round(confidence, 2), round(prediction, 2),
+                round(ev, 5), round(pf, 2), " | ".join(reason)
+            ])
+    except Exception:
+        pass
+
+    print(f"Confidence Budget: {budget:,.0f} KRW | x{multiplier:.2f} | {' | '.join(reason)}")
+    return budget
+
+
+def calculate_exit_recovery_score(ticker, profit_rate, state):
+    score = 50
+    reasons = []
+
+    btc_15m = get_btc_change_minutes(15)
+    if btc_15m > 0.002:
+        score += 10
+        reasons.append("BTC 15m 회복")
+    elif btc_15m < -0.004:
+        score -= 12
+        reasons.append("BTC 15m 약세")
+
+    try:
+        strength_score, strength_reason = check_strength(ticker)
+    except Exception:
+        strength_score, strength_reason = 2, "strength error"
+
+    if strength_score >= 4:
+        score += 18
+        reasons.append(f"코인 강도 유지 {strength_reason}")
+    elif strength_score <= 2:
+        score -= 15
+        reasons.append(f"코인 강도 약함 {strength_reason}")
+
+    # small loss zone can be noise
+    if EXIT_SMALL_LOSS_ZONE <= profit_rate < 0:
+        score += 8
+        reasons.append("작은 손실 구간")
+    elif profit_rate <= EXIT_DEEP_LOSS_FORCE:
+        score -= 25
+        reasons.append("깊은 손실 강제위험")
+
+    # If MFE was positive and now slipped, recovery is less likely
+    mfe = float(state.get("mfe", 0) or 0)
+    if mfe >= 0.012 and profit_rate < 0:
+        score -= 8
+        reasons.append("수익 후 음전")
+
+    # Leader gets more room
+    if state.get("entry_leader_mode", False):
+        score += 8
+        reasons.append("리더모드 유예")
+
+    return max(0, min(100, score)), " | ".join(reasons), strength_score, btc_15m
+
+
+def exit_intelligence_decision(ticker, profit_rate, state, hold_minutes, original_reason):
+    """
+    Returns (should_sell, reason).
+    If recovery score is high, delay the sell.
+    """
+    if not EXIT_INTELLIGENCE_ENABLED:
+        return True, original_reason
+
+    recovery_score, reason, strength_score, btc_15m = calculate_exit_recovery_score(ticker, profit_rate, state)
+
+    decision = "SELL"
+    final_reason = original_reason
+
+    if profit_rate <= EXIT_DEEP_LOSS_FORCE:
+        decision = "SELL"
+        final_reason = f"{original_reason} | ExitAI deep loss force"
+    elif recovery_score >= EXIT_RECOVERY_SCORE_HOLD and profit_rate > EXIT_DEEP_LOSS_FORCE:
+        # Avoid repeated hold forever: use timestamp
+        last_hold = float(state.get("exit_ai_last_hold_time", 0) or 0)
+        if time.time() - last_hold >= EXIT_RECOVERY_HOLD_MINUTES * 60:
+            state["exit_ai_last_hold_time"] = time.time()
+            save_state(state)
+            decision = "HOLD"
+            final_reason = f"ExitAI 회복점수 {recovery_score} → {EXIT_RECOVERY_HOLD_MINUTES}분 유예 | {reason}"
+        else:
+            decision = "SELL" if recovery_score <= EXIT_RECOVERY_SCORE_SELL else "HOLD"
+            final_reason = f"ExitAI 재평가 {recovery_score} | {reason}"
+    elif recovery_score <= EXIT_RECOVERY_SCORE_SELL:
+        decision = "SELL"
+        final_reason = f"{original_reason} | ExitAI 약함 {recovery_score} | {reason}"
+    else:
+        # middle zone: sell only if original was hard stop, otherwise hold
+        if profit_rate > EXIT_SMALL_LOSS_ZONE and "손절" in original_reason:
+            decision = "HOLD"
+            final_reason = f"ExitAI 중립 {recovery_score} → 작은 손실 유예 | {reason}"
+        else:
+            decision = "SELL"
+            final_reason = f"{original_reason} | ExitAI 중립 {recovery_score} | {reason}"
+
+    try:
+        init_exit_intelligence_log()
+        with open(EXIT_INTELLIGENCE_LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(), ticker, round(profit_rate, 5), recovery_score,
+                decision, final_reason, strength_score, round(btc_15m, 5),
+                "", "", round(hold_minutes, 2)
+            ])
+    except Exception:
+        pass
+
+    print(f"Exit Intelligence: {decision} | score {recovery_score} | {final_reason}")
+    return decision == "SELL", final_reason
+
+
 def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
     learning = get_auto_learning_adjustments()
     advanced_learning = get_advanced_learning_adjustments()
@@ -4389,10 +4876,11 @@ def start_watch(best, state, top_results=None):
         f"현재가: {watch_items[0].get('watch_price', 0):,.3f}원"
     )
 
-def buy_coin(best, krw_balance):
+def buy_coin(best, krw_balance, buy_budget=None):
     if not acquire_buy_lock():
         return False
-    if krw_balance < BUY_KRW:
+    buy_amount = buy_budget if buy_budget is not None else BUY_KRW
+    if krw_balance < buy_amount:
         print("KRW 잔고 부족")
         release_buy_lock()
         return False
@@ -4401,7 +4889,7 @@ def buy_coin(best, krw_balance):
 
     write_ai_recorder("BUY_ATTEMPT", best, decision="BUY", reason="시장가 매수 시도")
     print(f"{ticker} 매수 실행")
-    result = upbit.buy_market_order(ticker, BUY_KRW)
+    result = upbit.buy_market_order(ticker, buy_amount)
     print(result)
 
     if isinstance(result, dict) and result.get("error"):
@@ -4587,6 +5075,9 @@ def manage_holding(ticker, state):
         sell_reason = "4시간 경과 수익 정리"
 
     if sell_signal:
+        sell_signal, sell_reason = exit_intelligence_decision(ticker, profit_rate, state, hold_minutes, sell_reason)
+
+    if sell_signal:
         print("매도 실행")
         result = upbit.sell_market_order(ticker, balance)
         print(result)
@@ -4633,10 +5124,11 @@ def manage_holding(ticker, state):
 # MAIN LOOP
 # =========================
 def main():
-    print("Upbit v6.4 Self Optimizer Connected 시작")
+    print("Upbit v7 Meta AI + Exit Intelligence 시작")
 
     init_trade_log()
     analyze_trade_log()
+    evaluate_shadow_trades()
 
     override = load_strategy_override()
     if override.get("enabled"):
@@ -4672,6 +5164,20 @@ def main():
         if not top_results:
             print("매수할 코인 없음")
             write_ai_recorder("NO_CANDIDATE", {}, decision="NO_BUY", reason="통과 후보 없음")
+            return
+
+        add_shadow_trades(top_results)
+        shadow_summary = summarize_shadow_performance()
+        if shadow_summary:
+            print(
+                f"Shadow 성과 | {shadow_summary['count']}건 | "
+                f"승률 {shadow_summary['win_rate']:.1f}% | "
+                f"평균 {shadow_summary['avg']:.2f}%"
+            )
+
+        meta_block, meta_reason = meta_no_trade_decision(top_results)
+        if meta_block:
+            write_ai_recorder("META_NO_TRADE", top_results[0] if top_results else {}, decision="NO_TRADE", reason=meta_reason)
             return
 
         best = top_results[0]
