@@ -1,0 +1,9 @@
+{
+  "mode": "COLLECT_MORE_DATA",
+  "strategy_changes": [],
+  "exit_changes": [],
+  "market_filter_changes": [],
+  "notes": [
+    "Not enough clear failure pattern yet."
+  ]
+}

@@ -1,0 +1,12 @@
+===== Nestrova Reflection Report v3 =====
+Generated: 2026-06-29 19:23:11
+
+## Loss reason summary
+
+## Bad strategies
+
+## Trade reflections
+
+## Action plan
+Mode: COLLECT_MORE_DATA
+- Note: Not enough clear failure pattern yet.

@@ -1,52 +1,47 @@
 import json
 from pathlib import Path
 
-def build_action_plan(trade_summary, ev_summary):
+def build_reflection_action_plan(reflection_summary):
     plan = {
-        "mode_recommendation": "OBSERVE",
-        "disabled_strategies": [],
-        "reduced_strategies": [],
-        "preferred_strategies": [],
-        "blocked_tickers": [],
+        "mode": "REVIEW",
+        "strategy_changes": [],
+        "exit_changes": [],
+        "market_filter_changes": [],
         "notes": []
     }
 
-    sell_count = trade_summary.get("sell_count", 0)
-    total_profit = trade_summary.get("total_profit_pct", 0)
-    avg_loss = trade_summary.get("avg_loss_pct", 0)
+    reasons = reflection_summary.get("loss_reasons", {})
+    bad_strategies = reflection_summary.get("bad_strategies", [])
 
-    if sell_count < 5:
-        plan["mode_recommendation"] = "COLLECT_MORE_DATA"
-        plan["notes"].append("Completed trades are fewer than 5. Do not overfit yet.")
-    elif total_profit < 0:
-        plan["mode_recommendation"] = "DEFENSIVE_TUNING"
-        plan["notes"].append("Recent realized performance is negative. Reduce poor strategies before adding new entries.")
+    if reasons.get("POSSIBLE_FALSE_STOP", 0) >= 2:
+        plan["exit_changes"].append("Enable/strengthen Recovery Score before small stop-loss exits.")
+        plan["notes"].append("Multiple small losses may be false stops.")
 
-    for row in trade_summary.get("by_strategy", []):
-        if row["count"] >= 3 and row["total_pct"] < -2:
-            plan["disabled_strategies"].append(row["name"])
-            plan["notes"].append(f"Disable/reduce strategy: {row['name']} total {row['total_pct']:.2f}%")
-        elif row["count"] >= 3 and row["avg_pct"] < -0.5:
-            plan["reduced_strategies"].append(row["name"])
+    if reasons.get("STOP_LOSS", 0) >= 2:
+        plan["exit_changes"].append("Review entry quality; avoid widening stop-loss before fixing entries.")
+        plan["notes"].append("Repeated stop-loss exits detected.")
 
-    for row in reversed(trade_summary.get("by_strategy", [])):
-        if row["count"] >= 3 and row["total_pct"] > 1:
-            plan["preferred_strategies"].append(row["name"])
+    if reasons.get("BEAR_MARKET_ENTRY", 0) >= 1:
+        plan["market_filter_changes"].append("Disable aggressive entries during RISK_OFF_DAY unless EV is very high.")
 
-    for row in trade_summary.get("by_ticker", []):
-        if row["count"] >= 2 and row["total_pct"] < -3:
-            plan["blocked_tickers"].append(row["name"])
-            plan["notes"].append(f"Temporarily block ticker: {row['name']} total {row['total_pct']:.2f}%")
+    for s in bad_strategies[:5]:
+        plan["strategy_changes"].append({
+            "strategy": s["strategy"],
+            "recommendation": "REDUCE_OR_DISABLE",
+            "total_pct": round(s["total_pct"], 2),
+            "avg_pct": round(s["avg_pct"], 2),
+            "count": s["count"]
+        })
 
-    if ev_summary.get("count", 0) and ev_summary.get("avg_ev_pct", 0) < 0.3:
-        plan["notes"].append("Average EV is low. Raise EV_MIN_BUY or reduce low-EV trades.")
-
-    if avg_loss < -1.5:
-        plan["notes"].append("Average loss is large. Review exit logic and false-stop / late-stop behavior.")
+    if not plan["strategy_changes"] and not plan["exit_changes"] and not plan["market_filter_changes"]:
+        plan["mode"] = "COLLECT_MORE_DATA"
+        plan["notes"].append("Not enough clear failure pattern yet.")
+    else:
+        plan["mode"] = "APPLY_TARGETED_FIXES"
 
     return plan
 
-def save_action_plan(plan, path="reports/action_plan.json"):
+def save_json(data, path):
     path = Path(path)
     path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

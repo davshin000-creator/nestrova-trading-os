@@ -116,6 +116,8 @@ PORTFOLIO_AI_LOG_FILE = "portfolio_ai_log.csv"
 SIMULATION_LOG_FILE = "simulation_log.csv"
 EVOLUTION_LOG_FILE = "evolution_log.csv"
 STRATEGY_WEIGHT_FILE = "strategy_weights.json"
+STRATEGY_OVERRIDE_FILE = "config/strategy_override.json"
+SELF_OPTIMIZER_LOG_FILE = "self_optimizer_log.csv"
 ENTRY_ZONE_LOG_FILE = "entry_zone_log.csv"
 PREDICTION_LOG_FILE = "candidate_prediction_log.csv"
 AUTO_TUNING_FILE = "auto_tuning_state.json"
@@ -359,6 +361,7 @@ def init_trade_log():
 def write_trade_log(event, ticker, market_regime="", strategy="", score="",
                     rank_score="", price="", profit_rate="", highest_price="", note=""):
     init_trade_log()
+    init_self_optimizer_log()
     init_ai_recorder_log()
     init_trade_detail_log()
     init_candidate_snapshot_log()
@@ -576,6 +579,10 @@ def is_relaxed_mode():
 
 
 def is_immediate_leader_candidate(result):
+    override_blocked = result.get("rank_score", 0) < -500 or result.get("ai_risk", 0) >= 100
+    if override_blocked:
+        return False
+
     ai_ok = (
         result.get("ai_confidence", 0) >= AI_CONFIDENCE_BUY_THRESHOLD
         and result.get("ai_risk", 100) <= AI_RISK_BLOCK_THRESHOLD
@@ -3769,6 +3776,132 @@ def apply_portfolio_ai(results):
     return candidates
 
 
+
+def init_self_optimizer_log():
+    if not os.path.exists(SELF_OPTIMIZER_LOG_FILE):
+        with open(SELF_OPTIMIZER_LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "time", "ticker", "action", "reason",
+                "strategy", "rank_score_before", "rank_score_after",
+                "ai_risk_before", "ai_risk_after",
+                "expected_value_before", "expected_value_after"
+            ])
+
+
+def load_strategy_override():
+    if not os.path.exists(STRATEGY_OVERRIDE_FILE):
+        return {"enabled": False}
+    try:
+        with open(STRATEGY_OVERRIDE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"enabled": False}
+    except Exception as e:
+        print("strategy_override 읽기 오류:", e)
+        return {"enabled": False}
+
+
+def write_self_optimizer_log(result, action, reason, before):
+    try:
+        init_self_optimizer_log()
+        with open(SELF_OPTIMIZER_LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([
+                now_text(),
+                result.get("ticker", ""),
+                action,
+                reason,
+                result.get("ev_strategy") or result.get("tournament_winner") or result.get("strategy", ""),
+                round(before.get("rank_score", 0), 3),
+                round(result.get("rank_score", 0), 3),
+                round(before.get("ai_risk", 0), 3),
+                round(result.get("ai_risk", 0), 3),
+                round(before.get("expected_value", 0), 5),
+                round(result.get("expected_value", 0), 5),
+            ])
+    except Exception:
+        pass
+
+
+def apply_strategy_override_to_candidate(result):
+    override = load_strategy_override()
+    if not override.get("enabled"):
+        return result
+
+    before = {
+        "rank_score": result.get("rank_score", 0),
+        "ai_risk": result.get("ai_risk", 0),
+        "expected_value": result.get("expected_value", 0),
+    }
+
+    ticker = result.get("ticker", "")
+    strategy_text = " ".join([
+        str(result.get("ev_strategy", "")),
+        str(result.get("tournament_winner", "")),
+        str(result.get("strategy", ""))
+    ])
+
+    actions = []
+
+    if ticker in override.get("blocked_tickers", []):
+        result["rank_score"] -= 999
+        result["ai_risk"] = 100
+        result["expected_value"] = min(result.get("expected_value", 0), -0.05)
+        result["strategy"] += " + OVERRIDE_TICKER_BLOCK"
+        actions.append(("BLOCK_TICKER", ticker))
+
+    for disabled in override.get("disabled_strategies", []):
+        if disabled and disabled in strategy_text:
+            result["rank_score"] -= 999
+            result["ai_risk"] = 100
+            result["expected_value"] = min(result.get("expected_value", 0), -0.05)
+            result["strategy"] += f" + OVERRIDE_DISABLE_{disabled}"
+            actions.append(("DISABLE_STRATEGY", disabled))
+
+    for reduced in override.get("reduced_strategies", []):
+        if reduced and reduced in strategy_text:
+            result["rank_score"] -= 25
+            result["ai_risk"] = min(100, result.get("ai_risk", 0) + 10)
+            result["expected_value"] = result.get("expected_value", 0) - 0.003
+            result["strategy"] += f" + OVERRIDE_REDUCE_{reduced}"
+            actions.append(("REDUCE_STRATEGY", reduced))
+
+    for preferred in override.get("preferred_strategies", []):
+        if preferred and preferred in strategy_text:
+            result["rank_score"] += 12
+            result["ai_confidence"] = min(100, result.get("ai_confidence", 0) + 4)
+            result["expected_value"] = result.get("expected_value", 0) + 0.0015
+            result["strategy"] += f" + OVERRIDE_PREFER_{preferred}"
+            actions.append(("PREFER_STRATEGY", preferred))
+
+    ev_adjust = float(override.get("ev_min_buy_adjust", 0) or 0)
+    if ev_adjust:
+        result["expected_value"] = result.get("expected_value", 0) - ev_adjust
+        result["strategy"] += f" + OVERRIDE_EV_ADJ({ev_adjust})"
+        actions.append(("EV_ADJUST", str(ev_adjust)))
+
+    for action, reason in actions:
+        write_self_optimizer_log(result, action, reason, before)
+
+    return result
+
+
+def apply_strategy_override(results):
+    override = load_strategy_override()
+    if not override.get("enabled"):
+        return results
+
+    upgraded = [apply_strategy_override_to_candidate(r) for r in results]
+    return sorted(
+        upgraded,
+        key=lambda x: (
+            x.get("expected_value", -1),
+            x.get("portfolio_score", -999),
+            x.get("ai_confidence", 0) - x.get("ai_risk", 0) * 0.35,
+            x.get("rank_score", 0)
+        ),
+        reverse=True
+    )
+
+
 def find_top_coins(performance, limit=MULTI_WATCH_TOP_N):
     learning = get_auto_learning_adjustments()
     advanced_learning = get_advanced_learning_adjustments()
@@ -4500,10 +4633,17 @@ def manage_holding(ticker, state):
 # MAIN LOOP
 # =========================
 def main():
-    print("Upbit v6.3 Portfolio + Simulation + Evolution 시작")
+    print("Upbit v6.4 Self Optimizer Connected 시작")
 
     init_trade_log()
     analyze_trade_log()
+
+    override = load_strategy_override()
+    if override.get("enabled"):
+        print("strategy_override.json active")
+        print("disabled:", override.get("disabled_strategies", []))
+        print("reduced:", override.get("reduced_strategies", []))
+        print("blocked:", override.get("blocked_tickers", []))
 
     performance = get_performance_memory()
     state = load_state()

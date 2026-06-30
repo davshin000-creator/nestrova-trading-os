@@ -1,0 +1,15 @@
+{
+  "version": "NIC_v4_self_optimizer",
+  "enabled": true,
+  "disabled_strategies": [],
+  "reduced_strategies": [],
+  "preferred_strategies": [],
+  "blocked_tickers": [],
+  "strategy_score_adjust": {},
+  "ticker_score_adjust": {},
+  "ev_min_buy_adjust": 0.0,
+  "recovery_exit_enabled": true,
+  "notes": [
+    "Not enough clear failure pattern yet."
+  ]
+}
