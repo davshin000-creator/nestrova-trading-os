@@ -1,0 +1,7 @@
+{
+  "version": "Nestrova Beta Foundation 1.0",
+  "mode": "live",
+  "single_position_mode": true,
+  "log_dir": "data/logs",
+  "memory_dir": "data/memory"
+}

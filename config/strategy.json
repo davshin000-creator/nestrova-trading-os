@@ -1,0 +1,14 @@
+{
+  "active_strategies": [
+    "Leader",
+    "Scalp"
+  ],
+  "strategy_weights": {
+    "Leader": 1.0,
+    "Momentum": 1.0,
+    "Scalp": 1.0,
+    "Reversal": 1.0,
+    "Breakout": 1.0
+  },
+  "min_expected_value": 0.003
+}

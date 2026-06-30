@@ -1,0 +1,6 @@
+{
+  "daily_loss_limit_krw": 0,
+  "max_positions": 1,
+  "paper_mode_after_error": false,
+  "require_startup_check": true
+}
